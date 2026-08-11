@@ -5,3 +5,4 @@ export * from './trip-input';
 export * from './weather';
 export * from './place';
 export * from './route';
+export * from './trip-plan';

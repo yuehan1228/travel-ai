@@ -6,6 +6,7 @@ export * from './trip.schema';
 export * from './weather.schema';
 export * from './place.schema';
 export * from './route.schema';
+export * from './trip-plan.schema';
 
 import { z } from 'zod';
 

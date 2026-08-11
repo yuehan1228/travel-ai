@@ -137,7 +137,7 @@ Schema，缺少 Token 时不访问网络并在 `AUTH_TOKEN_INVALID` 时清理认
 ### 当前能力边界
 
 旅行草稿 CRUD、基础天气查询、POI 检索、两点路线估算、路线矩阵和确定性的访问顺序建议是当前服务端旅行业务能力。精确路线
-优化、地图 UI、攻略生成和 AI（LLM）能力留待后续任务；天气、地点和路线模块不创建 TripPlan、Timeline 或攻略生成逻辑。
+优化、地图 UI、攻略生成和 AI（LLM）能力留待后续任务；共享包仅提供严格的 TripPlan 结构化契约和 Runtime Schema，Schema 不证明 `providerPlaceId` 等实体真实性，真实性白名单校验由后续生成编排负责；天气、地点和路线模块不创建 TripPlan 实例、Timeline 或攻略生成逻辑。
 
 Migration 不会在应用启动时自动执行，也没有重置或删除生产表脚本。启动本地 PostgreSQL
 后，复制 `.env.example` 为 `.env` 并运行：
