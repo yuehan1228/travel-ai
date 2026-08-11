@@ -115,10 +115,21 @@ TASK-012 增加受认证的 `POST /routes/matrix` 基础层。共享契约限制
 矩阵单独缓存，也不新增 Migration、Redis、路线优化或地图 UI。小程序 `RouteMatrixService` 复用现有 HTTP/认证链路并通过
 `RouteMatrixResultSchema` 校验响应。
 
+### Route Order 建议顺序（TASK-013）
+
+`POST /routes/order` 先通过 `RouteMatrixService` 获取真实的 walking 或 driving 矩阵，再由纯函数最近邻算法生成访问顺序。
+输入点数仍限制为 2～10，`startId`/`endId`（如果提供）必须引用不同的输入点；没有起点时按点 ID 字典序选择起点，指定终点
+会被保留到最后。每一步只从当前点可用的有向 cell 中选择预计耗时最小者，耗时相同按真实距离、再按目标 ID 字典序比较。
+不可用 cell 不参与候选，无法形成覆盖全部点的顺序时返回 `ROUTE_ORDER_UNAVAILABLE`；矩阵 Provider 系统性失败映射为
+`ROUTE_ORDER_PROVIDER_ERROR`。结果返回相邻 legs、真实距离/耗时汇总、`algorithm=nearest_neighbor` 和 `isOptimal=false`，
+并明确该启发式算法不保证全局最优。访问顺序层不重复实现 Provider、不新增整单缓存或 Migration，也不实现精确 TSP、DBSCAN、
+TripPlan、Timeline、LLM 或地图 UI。小程序 `RouteOrderService` 沿用现有 Bearer Token、HTTP Client 和共享
+`RouteOrderResultSchema`，缺少 Token 时不会发起网络请求。
+
 ### 当前能力边界
 
-旅行草稿 CRUD、基础天气查询、POI 检索和两点路线估算是当前服务端旅行业务能力。路线/距离矩阵优化、地图 UI、攻略生成和 AI
-（LLM）能力留待后续任务；天气、地点和路线模块不创建 TripPlan、Timeline 或攻略生成逻辑。
+旅行草稿 CRUD、基础天气查询、POI 检索、两点路线估算、路线矩阵和确定性的访问顺序建议是当前服务端旅行业务能力。精确路线
+优化、地图 UI、攻略生成和 AI（LLM）能力留待后续任务；天气、地点和路线模块不创建 TripPlan、Timeline 或攻略生成逻辑。
 
 Migration 不会在应用启动时自动执行，也没有重置或删除生产表脚本。启动本地 PostgreSQL
 后，复制 `.env.example` 为 `.env` 并运行：

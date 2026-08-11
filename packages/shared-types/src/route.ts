@@ -43,6 +43,31 @@ export interface RouteMatrixResult {
   generatedAt: string;
 }
 
+export interface EstimateRouteOrderInput {
+  points: RouteMatrixPoint[];
+  mode: RouteMode;
+  startId?: string;
+  endId?: string;
+}
+
+export interface RouteOrderLeg {
+  originId: string;
+  destinationId: string;
+  estimate: RouteEstimate;
+}
+
+export interface RouteOrderResult {
+  orderedPointIds: string[];
+  legs: RouteOrderLeg[];
+  totalDistanceMeters: number;
+  totalDurationSeconds: number;
+  mode: RouteMode;
+  algorithm: 'nearest_neighbor';
+  isOptimal: false;
+  generatedAt: string;
+  warnings: string[];
+}
+
 export interface RouteEstimateBase {
   origin: RouteEndpoint;
   destination: RouteEndpoint;

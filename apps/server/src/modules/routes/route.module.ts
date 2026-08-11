@@ -22,6 +22,7 @@ import { ROUTE_CACHE_REPOSITORY, ROUTE_CLOCK, ROUTE_PROVIDER } from './route.tok
 import { systemRouteClock, type RouteClock } from './route.clock';
 import { RouteService } from './route.service';
 import { RouteMatrixService } from './route-matrix.service';
+import { RouteOrderService } from './route-order.service';
 import { RoutesController } from './routes.controller';
 
 export interface RouteModuleOptions {
@@ -72,8 +73,15 @@ export class RouteModule {
         { provide: ROUTE_CLOCK, useValue: options.routeClock ?? systemRouteClock },
         RouteService,
         RouteMatrixService,
+        RouteOrderService,
       ],
-      exports: [RouteService, RouteMatrixService, ROUTE_PROVIDER, ROUTE_CACHE_REPOSITORY],
+      exports: [
+        RouteService,
+        RouteMatrixService,
+        RouteOrderService,
+        ROUTE_PROVIDER,
+        ROUTE_CACHE_REPOSITORY,
+      ],
     };
   }
 }
@@ -93,9 +101,15 @@ export {
   RouteMatrixException,
   ROUTE_MATRIX_ERROR_CODES,
   type RouteMatrixErrorCode,
+  RouteOrderException,
+  ROUTE_ORDER_ERROR_CODES,
+  type RouteOrderErrorCode,
 } from './route.errors';
 export { RouteService } from './route.service';
 export { RouteMatrixService, ROUTE_MATRIX_MAX_CONCURRENCY } from './route-matrix.service';
+export { RouteOrderService } from './route-order.service';
+export { calculateNearestNeighborOrder, RouteOrderAlgorithmError } from './route-order.algorithm';
+export type { RouteOrderAlgorithmErrorCode } from './route-order.algorithm';
 export type { RouteClock } from './route.clock';
 export type { RouteProvider, RouteProviderResult } from './providers/route.provider';
 export { RouteProviderResultSchema } from './providers/route.provider';

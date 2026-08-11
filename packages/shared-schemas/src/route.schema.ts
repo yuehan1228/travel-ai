@@ -5,6 +5,7 @@ import {
   ROUTE_MODES,
   type AvailableRouteEstimate,
   type EstimateRouteMatrixInput,
+  type EstimateRouteOrderInput,
   type EstimateRouteInput,
   type RouteDataSource,
   type RouteEndpoint,
@@ -12,6 +13,8 @@ import {
   type RouteMatrixCell,
   type RouteMatrixPoint,
   type RouteMatrixResult,
+  type RouteOrderLeg,
+  type RouteOrderResult,
   type RouteMode,
   type UnavailableRouteEstimate,
 } from '@travel-guide/shared-types';
@@ -125,6 +128,52 @@ export const EstimateRouteMatrixInputSchema: z.ZodType<
   .strict()
   .superRefine((value, context) => {
     validateMatrixPoints(value.points, context, ['points']);
+  });
+
+export const EstimateRouteOrderInputSchema: z.ZodType<
+  EstimateRouteOrderInput,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    points: z
+      .array(RouteMatrixPointSchema)
+      .min(ROUTE_MATRIX_MIN_POINTS, {
+        message: `at least ${ROUTE_MATRIX_MIN_POINTS} points are required`,
+      })
+      .max(ROUTE_MATRIX_MAX_POINTS, {
+        message: `at most ${ROUTE_MATRIX_MAX_POINTS} points are allowed`,
+      }),
+    mode: RouteModeSchema,
+    startId: routeMatrixPointIdSchema.optional(),
+    endId: routeMatrixPointIdSchema.optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    validateMatrixPoints(value.points, context, ['points']);
+    const pointIds = new Set(value.points.map((point) => point.id));
+
+    if (value.startId !== undefined && !pointIds.has(value.startId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['startId'],
+        message: 'startId must reference one of the input points',
+      });
+    }
+    if (value.endId !== undefined && !pointIds.has(value.endId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['endId'],
+        message: 'endId must reference one of the input points',
+      });
+    }
+    if (value.startId !== undefined && value.startId === value.endId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['endId'],
+        message: 'startId and endId must be different',
+      });
+    }
   });
 
 const nonNegativeIntegerSchema = z.number().finite().int().nonnegative();
@@ -321,6 +370,108 @@ export const RouteMatrixResultSchema: z.ZodType<RouteMatrixResult, z.ZodTypeDef,
         });
         break;
       }
+    }
+  });
+
+const routeOrderLegSchema: z.ZodType<RouteOrderLeg, z.ZodTypeDef, unknown> = z
+  .object({
+    originId: routeMatrixPointIdSchema,
+    destinationId: routeMatrixPointIdSchema,
+    estimate: RouteEstimateSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.originId === value.destinationId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['destinationId'],
+        message: 'route order legs must not contain self-routes',
+      });
+    }
+    if (value.estimate.dataSource === 'unavailable') {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['estimate'],
+        message: 'route order legs require an available route estimate',
+      });
+    }
+  });
+
+const routeOrderWarningSchema = z.string().trim().min(1).max(256);
+
+export const RouteOrderLegSchema = routeOrderLegSchema;
+
+export const RouteOrderResultSchema: z.ZodType<RouteOrderResult, z.ZodTypeDef, unknown> = z
+  .object({
+    orderedPointIds: z
+      .array(routeMatrixPointIdSchema)
+      .min(ROUTE_MATRIX_MIN_POINTS)
+      .max(ROUTE_MATRIX_MAX_POINTS),
+    legs: z.array(routeOrderLegSchema).max(ROUTE_MATRIX_MAX_POINTS - 1),
+    totalDistanceMeters: nonNegativeIntegerSchema,
+    totalDurationSeconds: nonNegativeIntegerSchema,
+    mode: RouteModeSchema,
+    algorithm: z.literal('nearest_neighbor'),
+    isOptimal: z.literal(false),
+    generatedAt: z.string().datetime({ offset: true }),
+    warnings: z.array(routeOrderWarningSchema).max(32),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.orderedPointIds).size !== value.orderedPointIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['orderedPointIds'],
+        message: 'orderedPointIds must not contain duplicates',
+      });
+    }
+    if (value.legs.length !== value.orderedPointIds.length - 1) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['legs'],
+        message: 'legs must match adjacent orderedPointIds',
+      });
+    }
+
+    let totalDistanceMeters = 0;
+    let totalDurationSeconds = 0;
+    value.legs.forEach((leg, index) => {
+      if (
+        leg.originId !== value.orderedPointIds[index] ||
+        leg.destinationId !== value.orderedPointIds[index + 1]
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['legs', index],
+          message: 'legs must follow adjacent orderedPointIds',
+        });
+      }
+      if (leg.estimate.mode !== value.mode) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['legs', index, 'estimate', 'mode'],
+          message: 'leg estimate mode must match the order mode',
+        });
+      }
+      if (leg.estimate.dataSource !== 'unavailable') {
+        totalDistanceMeters += leg.estimate.distanceMeters;
+        totalDurationSeconds += leg.estimate.durationSeconds;
+      }
+    });
+
+    if (value.totalDistanceMeters !== totalDistanceMeters) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['totalDistanceMeters'],
+        message: 'totalDistanceMeters must equal the leg distance sum',
+      });
+    }
+    if (value.totalDurationSeconds !== totalDurationSeconds) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['totalDurationSeconds'],
+        message: 'totalDurationSeconds must equal the leg duration sum',
+      });
     }
   });
 

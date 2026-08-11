@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   EstimateRouteInputSchema,
   EstimateRouteMatrixInputSchema,
+  EstimateRouteOrderInputSchema,
   RouteEstimateSchema,
   RouteMatrixResultSchema,
+  RouteOrderResultSchema,
 } from '../src/route.schema';
 
 const input = {
@@ -176,6 +178,58 @@ describe('route schemas', () => {
           { originId: 'start', destinationId: 'start', status: 'unavailable' as const },
         ],
       }).success,
+    ).toBe(false);
+  });
+
+  it('validates route-order inputs and strict deterministic results', () => {
+    const points = [
+      { id: 'a', endpoint: input.origin },
+      { id: 'b', endpoint: input.destination },
+    ];
+    expect(
+      EstimateRouteOrderInputSchema.safeParse({ points, mode: 'walking', startId: 'a', endId: 'b' })
+        .success,
+    ).toBe(true);
+    expect(
+      EstimateRouteOrderInputSchema.safeParse({ points, mode: 'walking', startId: 'missing' })
+        .success,
+    ).toBe(false);
+    expect(
+      EstimateRouteOrderInputSchema.safeParse({ points, mode: 'walking', startId: 'a', endId: 'a' })
+        .success,
+    ).toBe(false);
+    expect(
+      EstimateRouteOrderInputSchema.safeParse({ points, mode: 'walking', unexpected: true })
+        .success,
+    ).toBe(false);
+
+    const estimate = {
+      ...input,
+      dataSource: 'map_provider' as const,
+      provider: 'amap',
+      fetchedAt: '2026-08-11T00:00:00.000Z',
+      distanceMeters: 1_234,
+      durationSeconds: 600,
+    };
+    const result = {
+      orderedPointIds: ['a', 'b'],
+      legs: [{ originId: 'a', destinationId: 'b', estimate }],
+      totalDistanceMeters: 1_234,
+      totalDurationSeconds: 600,
+      mode: 'walking' as const,
+      algorithm: 'nearest_neighbor' as const,
+      isOptimal: false as const,
+      generatedAt: '2026-08-11T00:00:00.000Z',
+      warnings: ['Nearest-neighbor ordering is deterministic but not globally optimal.'],
+    };
+    expect(RouteOrderResultSchema.safeParse(result).success).toBe(true);
+    expect(RouteOrderResultSchema.safeParse({ ...result, isOptimal: true }).success).toBe(false);
+    expect(RouteOrderResultSchema.safeParse({ ...result, totalDistanceMeters: 999 }).success).toBe(
+      false,
+    );
+    expect(
+      RouteOrderResultSchema.safeParse({ ...result, legs: [{ ...result.legs[0], extra: true }] })
+        .success,
     ).toBe(false);
   });
 });

@@ -85,6 +85,12 @@ API Key。
 小程序 `RouteMatrixService` 复用现有 Bearer Token、HTTP Client 和共享 Zod Schema。多途经点优化（TSP）、公交详情、
 地图 UI 和 LLM 仍未实现。
 
+访问顺序建议使用需要认证的 `POST /routes/order`，在真实路线矩阵上运行确定性的最近邻（nearest-neighbor）贪心算法。
+请求可指定 `startId` 和 `endId`；未指定起点时按点 ID 字典序选择，候选路线按预计耗时、距离和目标 ID 依次打破平局，
+并将指定终点保留到最后。不可用的两点路线不会参与候选；若无法覆盖全部点则返回 `ROUTE_ORDER_UNAVAILABLE`。结果明确标记
+`algorithm=nearest_neighbor` 和 `isOptimal=false`，总距离与总耗时只汇总真实矩阵中的可用路线。该算法不保证全局最优，
+不实现精确 TSP、动态规划、LLM 或地图展示；小程序 `RouteOrderService` 负责 Bearer Token 和共享 Schema 响应校验。
+
 ### 旅行需求草稿 API（TASK-008）
 
 所有 `/trips` 请求都必须携带 `Authorization: Bearer <access-token>`。服务端从
