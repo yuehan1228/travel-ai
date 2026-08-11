@@ -77,7 +77,13 @@ POI 文本搜索接口；小程序仅提供类型安全的 `PlaceService`，尚�
 也不会返回步骤指令或 Polyline。公共 `route_cache` 使用 PostgreSQL 和固定长度 SHA-256 key，不包含 userId 或
 API Key。供应商暂时失败时仅在配置的 stale-if-error 窗口内返回已验证旧缓存；没有路线时返回
 `ROUTE_UNAVAILABLE`，不携带伪造的距离、时长或费用。小程序 `RouteService` 只发送 Bearer Token，不保存地图
-API Key。多途经点、公交详情、多点路线优化（TSP）、地图 UI 和 LLM 仍未实现。
+API Key。
+
+路线矩阵使用需要认证的 `POST /routes/matrix`，接受 2～10 个带唯一 ID 的点，生成有向非对角线的两点组合。矩阵
+逐条复用 `RouteService` 和公共两点缓存，最多并发 4 个查询；单条路线不可用时仅标记对应 cell，不伪造距离、时长或
+费用。全部路线均不可用时返回 `ROUTE_MATRIX_UNAVAILABLE`，输入和 Provider 系统性失败分别返回稳定的矩阵错误码。
+小程序 `RouteMatrixService` 复用现有 Bearer Token、HTTP Client 和共享 Zod Schema。多途经点优化（TSP）、公交详情、
+地图 UI 和 LLM 仍未实现。
 
 ### 旅行需求草稿 API（TASK-008）
 

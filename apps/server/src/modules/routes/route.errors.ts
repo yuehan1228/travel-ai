@@ -15,6 +15,20 @@ export class RouteException extends ApiBusinessException {
   }
 }
 
+export const ROUTE_MATRIX_ERROR_CODES = [
+  'ROUTE_MATRIX_VALIDATION_ERROR',
+  'ROUTE_MATRIX_PROVIDER_ERROR',
+  'ROUTE_MATRIX_UNAVAILABLE',
+] as const;
+
+export type RouteMatrixErrorCode = (typeof ROUTE_MATRIX_ERROR_CODES)[number];
+
+export class RouteMatrixException extends ApiBusinessException {
+  public constructor(code: RouteMatrixErrorCode, statusCode: number, message: string) {
+    super(statusCode, code, message);
+  }
+}
+
 export class RouteProviderError extends Error {
   public constructor() {
     super('Route provider request failed');

@@ -19,6 +19,30 @@ export interface EstimateRouteInput {
   mode: RouteMode;
 }
 
+export interface RouteMatrixPoint {
+  id: string;
+  endpoint: RouteEndpoint;
+}
+
+export interface EstimateRouteMatrixInput {
+  points: RouteMatrixPoint[];
+  mode: RouteMode;
+}
+
+export interface RouteMatrixCell {
+  originId: string;
+  destinationId: string;
+  estimate?: RouteEstimate;
+  status: 'available' | 'unavailable';
+}
+
+export interface RouteMatrixResult {
+  points: RouteMatrixPoint[];
+  mode: RouteMode;
+  cells: RouteMatrixCell[];
+  generatedAt: string;
+}
+
 export interface RouteEstimateBase {
   origin: RouteEndpoint;
   destination: RouteEndpoint;

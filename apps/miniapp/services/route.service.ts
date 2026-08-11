@@ -1,5 +1,15 @@
-import { EstimateRouteInputSchema, RouteEstimateSchema } from '@travel-guide/shared-schemas';
-import type { EstimateRouteInput, RouteEstimate } from '@travel-guide/shared-types';
+import {
+  EstimateRouteInputSchema,
+  EstimateRouteMatrixInputSchema,
+  RouteEstimateSchema,
+  RouteMatrixResultSchema,
+} from '@travel-guide/shared-schemas';
+import type {
+  EstimateRouteInput,
+  EstimateRouteMatrixInput,
+  RouteEstimate,
+  RouteMatrixResult,
+} from '@travel-guide/shared-types';
 
 import { AuthService, authService } from './auth.service';
 import { createHttpClient, requestApi, type HttpClient, type RequestOptions } from './http-client';
@@ -20,6 +30,16 @@ export class RouteService {
       path: '/routes/estimate',
       data: parsedInput,
       schema: RouteEstimateSchema,
+    });
+  }
+
+  public async estimateRouteMatrix(input: EstimateRouteMatrixInput): Promise<RouteMatrixResult> {
+    const parsedInput = EstimateRouteMatrixInputSchema.parse(input);
+    return this.request<RouteMatrixResult>({
+      method: 'POST',
+      path: '/routes/matrix',
+      data: parsedInput,
+      schema: RouteMatrixResultSchema,
     });
   }
 

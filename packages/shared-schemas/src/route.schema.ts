@@ -4,10 +4,14 @@ import {
   ROUTE_DATA_SOURCES,
   ROUTE_MODES,
   type AvailableRouteEstimate,
+  type EstimateRouteMatrixInput,
   type EstimateRouteInput,
   type RouteDataSource,
   type RouteEndpoint,
   type RouteEstimate,
+  type RouteMatrixCell,
+  type RouteMatrixPoint,
+  type RouteMatrixResult,
   type RouteMode,
   type UnavailableRouteEstimate,
 } from '@travel-guide/shared-types';
@@ -48,6 +52,79 @@ export const EstimateRouteInputSchema: z.ZodType<EstimateRouteInput, z.ZodTypeDe
         message: 'origin and destination must be different',
       });
     }
+  });
+
+const ROUTE_MATRIX_MIN_POINTS = 2;
+const ROUTE_MATRIX_MAX_POINTS = 10;
+const ROUTE_MATRIX_POINT_ID_MAX_LENGTH = 64;
+
+const routeMatrixPointIdSchema = createTrimmedRequiredStringSchema(
+  'id',
+  ROUTE_MATRIX_POINT_ID_MAX_LENGTH,
+);
+
+export const RouteMatrixPointSchema: z.ZodType<RouteMatrixPoint, z.ZodTypeDef, unknown> = z
+  .object({
+    id: routeMatrixPointIdSchema,
+    endpoint: RouteEndpointSchema,
+  })
+  .strict();
+
+const normalizedCoordinateKey = (point: RouteMatrixPoint): string =>
+  `${point.endpoint.location.longitude.toFixed(6)},${point.endpoint.location.latitude.toFixed(6)}`;
+
+const validateMatrixPoints = (
+  points: RouteMatrixPoint[],
+  context: z.RefinementCtx,
+  path: (string | number)[],
+): void => {
+  const ids = new Map<string, number>();
+  const coordinates = new Map<string, number>();
+  points.forEach((point, index) => {
+    const previousId = ids.get(point.id);
+    if (previousId !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [...path, index, 'id'],
+        message: 'point ids must be unique',
+      });
+    } else {
+      ids.set(point.id, index);
+    }
+
+    const coordinateKey = normalizedCoordinateKey(point);
+    const previousCoordinate = coordinates.get(coordinateKey);
+    if (previousCoordinate !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [...path, index, 'endpoint', 'location'],
+        message: 'point coordinates must be unique after normalization',
+      });
+    } else {
+      coordinates.set(coordinateKey, index);
+    }
+  });
+};
+
+export const EstimateRouteMatrixInputSchema: z.ZodType<
+  EstimateRouteMatrixInput,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    points: z
+      .array(RouteMatrixPointSchema)
+      .min(ROUTE_MATRIX_MIN_POINTS, {
+        message: `at least ${ROUTE_MATRIX_MIN_POINTS} points are required`,
+      })
+      .max(ROUTE_MATRIX_MAX_POINTS, {
+        message: `at most ${ROUTE_MATRIX_MAX_POINTS} points are allowed`,
+      }),
+    mode: RouteModeSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    validateMatrixPoints(value.points, context, ['points']);
   });
 
 const nonNegativeIntegerSchema = z.number().finite().int().nonnegative();
@@ -100,4 +177,153 @@ export const RouteEstimateSchema: z.ZodType<RouteEstimate, z.ZodTypeDef, unknown
     }
   });
 
+const routeMatrixCellIdSchema = routeMatrixPointIdSchema;
+
+const availableRouteMatrixCellSchema = z
+  .object({
+    originId: routeMatrixCellIdSchema,
+    destinationId: routeMatrixCellIdSchema,
+    estimate: RouteEstimateSchema,
+    status: z.literal('available'),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.estimate.dataSource === 'unavailable') {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['estimate', 'dataSource'],
+        message: 'available cells require an available route estimate',
+      });
+    }
+  });
+
+const unavailableRouteMatrixCellSchema = z
+  .object({
+    originId: routeMatrixCellIdSchema,
+    destinationId: routeMatrixCellIdSchema,
+    status: z.literal('unavailable'),
+  })
+  .strict();
+
+export const RouteMatrixCellSchema: z.ZodType<RouteMatrixCell, z.ZodTypeDef, unknown> = z.union([
+  availableRouteMatrixCellSchema,
+  unavailableRouteMatrixCellSchema,
+]);
+
+const sameNormalizedLocation = (left: RouteEndpoint, right: RouteEndpoint): boolean =>
+  left.location.longitude.toFixed(6) === right.location.longitude.toFixed(6) &&
+  left.location.latitude.toFixed(6) === right.location.latitude.toFixed(6);
+
+export const RouteMatrixResultSchema: z.ZodType<RouteMatrixResult, z.ZodTypeDef, unknown> = z
+  .object({
+    points: z
+      .array(RouteMatrixPointSchema)
+      .min(ROUTE_MATRIX_MIN_POINTS, {
+        message: `at least ${ROUTE_MATRIX_MIN_POINTS} points are required`,
+      })
+      .max(ROUTE_MATRIX_MAX_POINTS, {
+        message: `at most ${ROUTE_MATRIX_MAX_POINTS} points are allowed`,
+      }),
+    mode: RouteModeSchema,
+    cells: z.array(RouteMatrixCellSchema),
+    generatedAt: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    validateMatrixPoints(value.points, context, ['points']);
+
+    const pointById = new Map(value.points.map((point) => [point.id, point]));
+    const expectedPairs = new Set<string>();
+    for (const origin of value.points) {
+      for (const destination of value.points) {
+        if (origin.id !== destination.id) {
+          expectedPairs.add(`${origin.id}\u0000${destination.id}`);
+        }
+      }
+    }
+
+    if (value.cells.length !== expectedPairs.size) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['cells'],
+        message: 'cells must contain exactly n × (n - 1) directed routes',
+      });
+    }
+
+    const seenPairs = new Set<string>();
+    value.cells.forEach((cell, index) => {
+      const pair = `${cell.originId}\u0000${cell.destinationId}`;
+      const origin = pointById.get(cell.originId);
+      const destination = pointById.get(cell.destinationId);
+      if (origin === undefined || destination === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['cells', index],
+          message: 'cell references an unknown point id',
+        });
+      }
+      if (cell.originId === cell.destinationId) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['cells', index],
+          message: 'cells must not contain routes from a point to itself',
+        });
+      }
+      if (seenPairs.has(pair)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['cells', index],
+          message: 'directed cell pairs must be unique',
+        });
+      } else {
+        seenPairs.add(pair);
+      }
+      if (!expectedPairs.has(pair)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['cells', index],
+          message: 'cell must be a directed non-diagonal point pair',
+        });
+      }
+
+      if (
+        cell.status === 'available' &&
+        cell.estimate !== undefined &&
+        origin !== undefined &&
+        destination !== undefined
+      ) {
+        if (cell.estimate.mode !== value.mode) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['cells', index, 'estimate', 'mode'],
+            message: 'cell estimate mode must match the matrix mode',
+          });
+        }
+        if (
+          !sameNormalizedLocation(cell.estimate.origin, origin.endpoint) ||
+          !sameNormalizedLocation(cell.estimate.destination, destination.endpoint)
+        ) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['cells', index, 'estimate'],
+            message: 'cell estimate endpoints must match the referenced points',
+          });
+        }
+      }
+    });
+
+    for (const pair of expectedPairs) {
+      if (!seenPairs.has(pair)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['cells'],
+          message: 'cells must include every directed non-diagonal point pair',
+        });
+        break;
+      }
+    }
+  });
+
 export { GeoPointSchema };
+
+export { ROUTE_MATRIX_MAX_POINTS, ROUTE_MATRIX_MIN_POINTS, ROUTE_MATRIX_POINT_ID_MAX_LENGTH };

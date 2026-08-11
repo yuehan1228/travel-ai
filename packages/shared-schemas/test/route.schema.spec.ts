@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { EstimateRouteInputSchema, RouteEstimateSchema } from '../src/route.schema';
+import {
+  EstimateRouteInputSchema,
+  EstimateRouteMatrixInputSchema,
+  RouteEstimateSchema,
+  RouteMatrixResultSchema,
+} from '../src/route.schema';
 
 const input = {
   origin: { location: { longitude: 120.15, latitude: 30.25 }, placeId: 'origin-poi' },
@@ -65,5 +70,112 @@ describe('route schemas', () => {
       false,
     );
     expect(RouteEstimateSchema.safeParse({ ...unavailable, tollsCny: 0 }).success).toBe(false);
+  });
+
+  it('validates matrix point count, ids, normalized coordinates and unknown fields', () => {
+    const points = [
+      { id: 'start', endpoint: input.origin },
+      { id: 'finish', endpoint: input.destination },
+    ];
+    expect(EstimateRouteMatrixInputSchema.safeParse({ points, mode: 'walking' }).success).toBe(
+      true,
+    );
+    expect(
+      EstimateRouteMatrixInputSchema.safeParse({
+        points: [{ ...points[0], id: ' start ' }, points[1]],
+        mode: 'walking',
+      }).success,
+    ).toBe(true);
+    expect(
+      EstimateRouteMatrixInputSchema.safeParse({
+        points: [
+          { ...points[0], id: 'same' },
+          { ...points[1], id: 'same' },
+        ],
+        mode: 'walking',
+      }).success,
+    ).toBe(false);
+    expect(
+      EstimateRouteMatrixInputSchema.safeParse({
+        points: [
+          points[0],
+          {
+            ...points[1],
+            endpoint: {
+              location: { longitude: 120.1500004, latitude: 30.2500004 },
+            },
+          },
+        ],
+        mode: 'walking',
+      }).success,
+    ).toBe(false);
+    expect(
+      EstimateRouteMatrixInputSchema.safeParse({ points, mode: 'walking', extra: true }).success,
+    ).toBe(false);
+    expect(
+      EstimateRouteMatrixInputSchema.safeParse({
+        points: Array.from({ length: 11 }, (_, index) => ({
+          id: `p-${index}`,
+          endpoint: {
+            location: { longitude: 120 + index / 100, latitude: 30 + index / 100 },
+          },
+        })),
+        mode: 'walking',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('requires every directed non-diagonal matrix cell and protects unavailable cells', () => {
+    const points = [
+      { id: 'start', endpoint: input.origin },
+      { id: 'finish', endpoint: input.destination },
+    ];
+    const estimate = {
+      ...input,
+      dataSource: 'map_provider' as const,
+      provider: 'amap',
+      fetchedAt: '2026-08-11T00:00:00.000Z',
+      distanceMeters: 1_234,
+      durationSeconds: 600,
+    };
+    const result = {
+      points,
+      mode: 'walking' as const,
+      generatedAt: '2026-08-11T00:00:00.000Z',
+      cells: [
+        { originId: 'start', destinationId: 'finish', status: 'available' as const, estimate },
+        { originId: 'finish', destinationId: 'start', status: 'unavailable' as const },
+      ],
+    };
+    expect(RouteMatrixResultSchema.safeParse(result).success).toBe(true);
+    expect(
+      RouteMatrixResultSchema.safeParse({
+        ...result,
+        cells: [
+          { originId: 'start', destinationId: 'finish', status: 'unavailable' as const },
+          {
+            originId: 'finish',
+            destinationId: 'start',
+            status: 'unavailable' as const,
+            estimate,
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      RouteMatrixResultSchema.safeParse({
+        ...result,
+        cells: [result.cells[0]],
+      }).success,
+    ).toBe(false);
+    expect(
+      RouteMatrixResultSchema.safeParse({
+        ...result,
+        cells: [
+          ...result.cells,
+          { originId: 'start', destinationId: 'start', status: 'unavailable' as const },
+        ],
+      }).success,
+    ).toBe(false);
   });
 });

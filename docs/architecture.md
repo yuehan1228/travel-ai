@@ -107,6 +107,14 @@ PostgreSQL `route_cache`，读取和写入都经过 `RouteEstimateSchema`。供�
 不访问真实地图 API 或 PostgreSQL。多点路线优化、公交换乘详情、路线几何 Polyline、地图页面、TSP、TripPlan、Timeline 和
 LLM 不在当前范围内。
 
+TASK-012 增加受认证的 `POST /routes/matrix` 基础层。共享契约限制矩阵点数为 2～10，点 ID 必须唯一，且坐标按路线
+服务使用的 6 位小数规范化后不得重复；结果只包含 `n × (n - 1)` 个有向非对角线 cell。服务端的 `RouteMatrixService`
+通过现有 `RouteService` 查询每一对点，使用最多 4 个并发 worker，不重新实现 Provider 或缓存。每个 cell 的路线仍优先
+命中公共两点 `route_cache`；单条 Provider 返回空路线时生成不含 estimate 的 `unavailable` cell，Provider 系统性失败则
+返回 `ROUTE_MATRIX_PROVIDER_ERROR`。如果所有 cell 都不可用，HTTP 层返回 `ROUTE_MATRIX_UNAVAILABLE`。矩阵不会按用户或整张
+矩阵单独缓存，也不新增 Migration、Redis、路线优化或地图 UI。小程序 `RouteMatrixService` 复用现有 HTTP/认证链路并通过
+`RouteMatrixResultSchema` 校验响应。
+
 ### 当前能力边界
 
 旅行草稿 CRUD、基础天气查询、POI 检索和两点路线估算是当前服务端旅行业务能力。路线/距离矩阵优化、地图 UI、攻略生成和 AI
