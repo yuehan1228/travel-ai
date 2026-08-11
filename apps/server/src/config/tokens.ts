@@ -1,0 +1,1 @@
+export const ENVIRONMENT_CONFIG = Symbol('ENVIRONMENT_CONFIG');

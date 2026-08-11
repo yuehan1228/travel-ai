@@ -1,0 +1,196 @@
+<view class="page">
+  <view class="hero">
+    <text class="title">{{projectName}}</text>
+    <text class="environment">当前环境：{{environment}}</text>
+    <text class="subtitle">告诉我们你的旅行想法，先保存一份需求草稿。</text>
+  </view>
+
+  <view class="auth-card">
+    <button
+      class="auth-button"
+      type="default"
+      loading="{{isAuthLoading}}"
+      disabled="{{isAuthLoading}}"
+      bindtap="onAuthAction"
+    >{{isLoggedIn ? '退出登录' : '登录'}}</button>
+    <view wx:if="{{authError}}" class="form-message error">{{authError}}</view>
+  </view>
+
+  <view class="form-card">
+    <view class="section-title">目的地与日期</view>
+
+    <view class="field">
+      <view class="label">目的地城市<text class="required">*</text></view>
+      <input
+        class="input"
+        value="{{form.cityName}}"
+        placeholder="例如：上海"
+        maxlength="100"
+        bindinput="onCityNameInput"
+      />
+      <view wx:if="{{fieldErrors.cityName}}" class="error">{{fieldErrors.cityName}}</view>
+    </view>
+
+    <view class="field">
+      <view class="label">城市编码<text class="optional">（可选）</text></view>
+      <input
+        class="input"
+        value="{{form.cityCode}}"
+        placeholder="例如：SHA"
+        maxlength="20"
+        bindinput="onCityCodeInput"
+      />
+      <view wx:if="{{fieldErrors.cityCode}}" class="error">{{fieldErrors.cityCode}}</view>
+    </view>
+
+    <view class="field">
+      <view class="label">出发地<text class="optional">（可选）</text></view>
+      <input
+        class="input"
+        value="{{form.origin}}"
+        placeholder="例如：北京"
+        maxlength="100"
+        bindinput="onOriginInput"
+      />
+      <view wx:if="{{fieldErrors.origin}}" class="error">{{fieldErrors.origin}}</view>
+    </view>
+
+    <view class="date-row">
+      <view class="field date-field">
+        <view class="label">出发日期<text class="required">*</text></view>
+        <picker mode="date" value="{{form.startDate}}" bindchange="onStartDateChange">
+          <view class="picker-value {{form.startDate ? '' : 'placeholder'}}">
+            {{form.startDate || '请选择出发日期'}}
+          </view>
+        </picker>
+        <view wx:if="{{fieldErrors.startDate}}" class="error">{{fieldErrors.startDate}}</view>
+      </view>
+      <view class="field date-field">
+        <view class="label">返程日期<text class="required">*</text></view>
+        <picker mode="date" value="{{form.endDate}}" bindchange="onEndDateChange">
+          <view class="picker-value {{form.endDate ? '' : 'placeholder'}}">
+            {{form.endDate || '请选择返程日期'}}
+          </view>
+        </picker>
+        <view wx:if="{{fieldErrors.endDate}}" class="error">{{fieldErrors.endDate}}</view>
+      </view>
+    </view>
+
+    <view class="section-title section-spaced">出行人数与偏好</view>
+
+    <view class="field">
+      <view class="label">出行人数<text class="required">*</text></view>
+      <view class="stepper">
+        <button class="stepper-button" size="mini" disabled="{{form.travelerCount <= 1}}" bindtap="onTravelerDecrease">−</button>
+        <text class="stepper-value">{{form.travelerCount}} 人</text>
+        <button class="stepper-button" size="mini" disabled="{{form.travelerCount >= 20}}" bindtap="onTravelerIncrease">+</button>
+      </view>
+      <view wx:if="{{fieldErrors.travelerCount}}" class="error">{{fieldErrors.travelerCount}}</view>
+    </view>
+
+    <view class="field">
+      <view class="label">旅行偏好<text class="required">*</text><text class="hint">（可多选）</text></view>
+      <checkbox-group class="option-grid" bindchange="onPreferencesChange">
+        <label class="option checkbox-option" wx:for="{{preferenceOptions}}" wx:key="value">
+          <checkbox value="{{item.value}}" checked="{{item.checked}}" color="#2563eb" />
+          <text>{{item.label}}</text>
+        </label>
+      </checkbox-group>
+      <view wx:if="{{fieldErrors.preferences}}" class="error">{{fieldErrors.preferences}}</view>
+    </view>
+
+    <view class="field">
+      <view class="label">旅行节奏<text class="required">*</text></view>
+      <radio-group class="option-list" bindchange="onPaceChange">
+        <label class="option" wx:for="{{paceOptions}}" wx:key="value">
+          <radio value="{{item.value}}" checked="{{form.pace === item.value}}" color="#2563eb" />
+          <text>{{item.label}}</text>
+        </label>
+      </radio-group>
+      <view wx:if="{{fieldErrors.pace}}" class="error">{{fieldErrors.pace}}</view>
+    </view>
+
+    <view class="section-title section-spaced">预算与交通</view>
+
+    <view class="field">
+      <view class="label">预算方式</view>
+      <radio-group class="option-list" bindchange="onBudgetModeChange">
+        <label class="option">
+          <radio value="none" checked="{{form.budgetMode === 'none'}}" color="#2563eb" />
+          <text>暂不确定</text>
+        </label>
+        <label class="option">
+          <radio value="level" checked="{{form.budgetMode === 'level'}}" color="#2563eb" />
+          <text>预算等级</text>
+        </label>
+        <label class="option">
+          <radio value="custom" checked="{{form.budgetMode === 'custom'}}" color="#2563eb" />
+          <text>自定义金额</text>
+        </label>
+      </radio-group>
+      <view wx:if="{{form.budgetMode === 'level'}}" class="sub-options">
+        <radio-group class="option-list" bindchange="onBudgetLevelChange">
+          <label class="option" wx:for="{{budgetOptions}}" wx:key="value">
+            <radio value="{{item.value}}" checked="{{form.budgetLevel === item.value}}" color="#2563eb" />
+            <text>{{item.label}}</text>
+          </label>
+        </radio-group>
+      </view>
+      <view wx:if="{{form.budgetMode === 'custom'}}" class="custom-budget">
+        <input
+          class="input"
+          type="digit"
+          value="{{form.customBudgetText}}"
+          placeholder="请输入旅行总预算（元）"
+          maxlength="20"
+          bindinput="onCustomBudgetInput"
+        />
+      </view>
+      <view wx:if="{{fieldErrors.budget}}" class="error">{{fieldErrors.budget}}</view>
+      <view wx:if="{{fieldErrors.customBudgetText}}" class="error">{{fieldErrors.customBudgetText}}</view>
+    </view>
+
+    <view class="field">
+      <view class="label">交通偏好<text class="required">*</text></view>
+      <radio-group class="option-list" bindchange="onTransportChange">
+        <label class="option" wx:for="{{transportOptions}}" wx:key="value">
+          <radio value="{{item.value}}" checked="{{form.transportPreference === item.value}}" color="#2563eb" />
+          <text>{{item.label}}</text>
+        </label>
+      </radio-group>
+      <view wx:if="{{fieldErrors.transportPreference}}" class="error">{{fieldErrors.transportPreference}}</view>
+    </view>
+
+    <view class="field">
+      <view class="label">补充要求<text class="optional">（可选）</text></view>
+      <textarea
+        class="textarea"
+        value="{{form.extraRequirements}}"
+        placeholder="例如：希望安排适合长辈的路线"
+        maxlength="1000"
+        auto-height="true"
+        bindinput="onExtraRequirementsInput"
+      />
+      <view class="character-count">{{form.extraRequirements.length}} / 1000</view>
+      <view wx:if="{{fieldErrors.extraRequirements}}" class="error">{{fieldErrors.extraRequirements}}</view>
+    </view>
+
+    <button class="submit-button" type="primary" loading="{{isSubmitting}}" disabled="{{isSubmitting}}" bindtap="onSubmitTrip">
+      保存旅行需求
+    </button>
+    <button class="clear-button" disabled="{{isSubmitting}}" bindtap="onClearDraft">清除本地草稿</button>
+    <view wx:if="{{submitMessage}}" class="form-message success-message">{{submitMessage}}</view>
+    <view wx:if="{{submitError}}" class="form-message error">{{submitError}}</view>
+  </view>
+
+  <view class="health-card">
+    <view class="section-title">服务状态</view>
+    <button class="health-button" type="default" loading="{{isLoading}}" disabled="{{isLoading}}" bindtap="onCheckHealth">
+      检查服务状态
+    </button>
+    <view wx:if="{{status === 'idle'}}" class="status status-idle">尚未检查服务状态</view>
+    <view wx:elif="{{status === 'loading'}}" class="status status-loading">正在检查服务状态…</view>
+    <view wx:elif="{{status === 'success'}}" class="status status-success">{{serviceStatus}}</view>
+    <view wx:elif="{{status === 'error'}}" class="status status-error">{{errorMessage}}</view>
+  </view>
+</view>

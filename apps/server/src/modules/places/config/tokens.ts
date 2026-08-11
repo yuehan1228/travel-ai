@@ -1,0 +1,1 @@
+export const PLACE_ENVIRONMENT = Symbol('PLACE_ENVIRONMENT');

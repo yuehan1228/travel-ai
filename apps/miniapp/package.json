@@ -1,0 +1,16 @@
+{
+  "name": "@travel-guide/miniapp",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "pnpm run build:runtime && tsc -p tsconfig.json --noEmit",
+    "build:runtime": "node scripts/build-runtime.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config vitest.config.mts"
+  },
+  "dependencies": {
+    "@travel-guide/shared-schemas": "workspace:*",
+    "@travel-guide/shared-types": "workspace:*",
+    "zod": "^3.24.1"
+  }
+}

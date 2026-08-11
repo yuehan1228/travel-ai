@@ -1,0 +1,28 @@
+{
+  "description": "AI 智能旅游攻略微信小程序",
+  "packOptions": {
+    "ignore": []
+  },
+  "packNpmManually": true,
+  "packNpmRelationList": [
+    {
+      "packageJsonPath": "./package.json",
+      "miniprogramNpmDistDir": "./miniprogram_npm"
+    }
+  ],
+  "setting": {
+    "compileHotReLoad": true,
+    "enhance": true,
+    "es6": true,
+    "minified": true,
+    "postcss": true,
+    "urlCheck": false,
+    "useCompilerPlugins": ["typescript"]
+  },
+  "compileType": "miniprogram",
+  "libVersion": "3.7.3",
+  "appid": "touristappid",
+  "projectname": "ai-travel-guide-miniapp",
+  "miniprogramRoot": "./",
+  "condition": {}
+}
