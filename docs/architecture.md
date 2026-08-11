@@ -126,6 +126,14 @@ TASK-012 增加受认证的 `POST /routes/matrix` 基础层。共享契约限制
 TripPlan、Timeline、LLM 或地图 UI。小程序 `RouteOrderService` 沿用现有 Bearer Token、HTTP Client 和共享
 `RouteOrderResultSchema`，缺少 Token 时不会发起网络请求。
 
+TASK-014 增加 `POST /routes/order/explain` 以及共享 `RouteOrderExplanationResultSchema`。解释接口在同一次
+`RouteMatrixService` 查询结果上生成访问顺序和逐步决策说明，不重复调用路线 Provider，也不增加整单缓存。每一步候选均携带真实
+路线可用性；不可用候选只携带明确的排除原因，不携带距离或耗时。决策原因严格对应耗时最短、距离平局、目标 ID 平局和固定终点四类
+比较过程，`order`、`legs`、决策和累计汇总必须保持一致。结果和说明均明确最近邻算法不保证全局最优；输入非法、Provider 系统性失败、
+无法形成完整顺序分别使用 `ROUTE_ORDER_VALIDATION_ERROR`、`ROUTE_ORDER_PROVIDER_ERROR` 和 `ROUTE_ORDER_UNAVAILABLE`。候选、决策和
+不可用路线数量受 2～10 个矩阵点的共享上限约束。小程序 `RouteOrderExplanationService` 复用 Bearer Token、HttpClient 和共享
+Schema，缺少 Token 时不访问网络并在 `AUTH_TOKEN_INVALID` 时清理认证状态。
+
 ### 当前能力边界
 
 旅行草稿 CRUD、基础天气查询、POI 检索、两点路线估算、路线矩阵和确定性的访问顺序建议是当前服务端旅行业务能力。精确路线

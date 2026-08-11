@@ -20,6 +20,7 @@ import type {
   EstimateRouteInput,
   EstimateRouteMatrixInput,
   EstimateRouteOrderInput,
+  RouteOrderExplanationResult,
   RouteEstimate,
   RouteMatrixResult,
   RouteOrderResult,
@@ -123,6 +124,21 @@ export class RoutesController {
     @Req() request: FastifyRequest,
   ): Promise<ApiSuccess<RouteOrderResult>> {
     const result = await this.routeOrderService.estimateRouteOrder(parseOrderBody(body));
+    return {
+      success: true,
+      data: result,
+      requestId: requestIdFor(request),
+    };
+  }
+
+  @Post('order/explain')
+  @HttpCode(HttpStatus.OK)
+  public async estimateOrderExplanation(
+    @Body() body: unknown,
+    @CurrentUserId() _userId: string,
+    @Req() request: FastifyRequest,
+  ): Promise<ApiSuccess<RouteOrderExplanationResult>> {
+    const result = await this.routeOrderService.estimateRouteOrderExplanation(parseOrderBody(body));
     return {
       success: true,
       data: result,

@@ -68,6 +68,40 @@ export interface RouteOrderResult {
   warnings: string[];
 }
 
+export type RouteOrderCandidateStatus = 'available' | 'unavailable';
+
+export type RouteOrderDecisionReason =
+  'shortest_duration' | 'shortest_distance_tiebreaker' | 'destination_id_tiebreaker' | 'fixed_end';
+
+export interface RouteOrderCandidateExplanation {
+  destinationId: string;
+  status: RouteOrderCandidateStatus;
+  durationSeconds?: number;
+  distanceMeters?: number;
+  rejectionReason?: string;
+}
+
+export interface RouteOrderDecisionExplanation {
+  /** One-based decision number, matching the corresponding route leg. */
+  step: number;
+  originId: string;
+  selectedDestinationId: string;
+  reason: RouteOrderDecisionReason;
+  candidates: RouteOrderCandidateExplanation[];
+}
+
+export interface RouteOrderUnavailablePair {
+  originId: string;
+  destinationId: string;
+}
+
+export interface RouteOrderExplanationResult {
+  order: RouteOrderResult;
+  decisions: RouteOrderDecisionExplanation[];
+  unavailablePairs: RouteOrderUnavailablePair[];
+  algorithmNotice: string;
+}
+
 export interface RouteEstimateBase {
   origin: RouteEndpoint;
   destination: RouteEndpoint;

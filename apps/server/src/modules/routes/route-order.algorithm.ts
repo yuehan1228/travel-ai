@@ -1,8 +1,14 @@
-import { RouteOrderResultSchema } from '@travel-guide/shared-schemas';
+import {
+  RouteOrderExplanationResultSchema,
+  RouteOrderResultSchema,
+} from '@travel-guide/shared-schemas';
 import type {
-  RouteEstimate,
+  AvailableRouteEstimate,
   RouteMatrixCell,
   RouteMatrixResult,
+  RouteOrderCandidateExplanation,
+  RouteOrderDecisionExplanation,
+  RouteOrderExplanationResult,
   RouteOrderLeg,
   RouteOrderResult,
 } from '@travel-guide/shared-types';
@@ -20,26 +26,27 @@ export class RouteOrderAlgorithmError extends Error {
   }
 }
 
+const ALGORITHM_NOTICE =
+  'Nearest-neighbor ordering is deterministic but does not guarantee a globally optimal route.';
+
 const compareIds = (left: string, right: string): number =>
   left < right ? -1 : left > right ? 1 : 0;
 
 const pairKey = (originId: string, destinationId: string): string =>
   `${originId}\u0000${destinationId}`;
 
-const availableEstimate = (cell: RouteMatrixCell | undefined): RouteEstimate | undefined => {
+const availableEstimate = (
+  cell: RouteMatrixCell | undefined,
+): AvailableRouteEstimate | undefined => {
   if (cell === undefined || cell.status !== 'available' || cell.estimate === undefined) {
     return undefined;
   }
   return cell.estimate.dataSource === 'unavailable' ? undefined : cell.estimate;
 };
 
-const compareCandidates = (
-  left: { id: string; estimate: RouteEstimate },
-  right: { id: string; estimate: RouteEstimate },
-): number => {
-  if (left.estimate.dataSource === 'unavailable' || right.estimate.dataSource === 'unavailable') {
-    return compareIds(left.id, right.id);
-  }
+type Candidate = { id: string; estimate: AvailableRouteEstimate };
+
+const compareCandidates = (left: Candidate, right: Candidate): number => {
   if (left.estimate.durationSeconds !== right.estimate.durationSeconds) {
     return left.estimate.durationSeconds - right.estimate.durationSeconds;
   }
@@ -49,15 +56,76 @@ const compareCandidates = (
   return compareIds(left.id, right.id);
 };
 
+const asCandidateExplanation = (
+  destinationId: string,
+  cell: RouteMatrixCell | undefined,
+  heldForEnd: boolean,
+): RouteOrderCandidateExplanation => {
+  const estimate = availableEstimate(cell);
+  if (estimate === undefined) {
+    return {
+      destinationId,
+      status: 'unavailable',
+      rejectionReason: 'route_unavailable',
+    };
+  }
+
+  return {
+    destinationId,
+    status: 'available',
+    durationSeconds: estimate.durationSeconds,
+    distanceMeters: estimate.distanceMeters,
+    ...(heldForEnd ? { rejectionReason: 'fixed_end' } : {}),
+  };
+};
+
+const decisionReason = (
+  selected: Candidate,
+  considered: Candidate[],
+  fixedEnd: boolean,
+): RouteOrderDecisionExplanation['reason'] => {
+  if (fixedEnd) return 'fixed_end';
+
+  const sameDuration = considered.filter(
+    (candidate) => candidate.estimate.durationSeconds === selected.estimate.durationSeconds,
+  );
+  if (sameDuration.length === 1) return 'shortest_duration';
+
+  const shortestDistance = Math.min(
+    ...sameDuration.map((candidate) => candidate.estimate.distanceMeters),
+  );
+  const sameDistance = sameDuration.filter(
+    (candidate) => candidate.estimate.distanceMeters === shortestDistance,
+  );
+  return sameDistance.length === 1 ? 'shortest_distance_tiebreaker' : 'destination_id_tiebreaker';
+};
+
+const unavailablePairsFor = (
+  matrix: RouteMatrixResult,
+): Array<{
+  originId: string;
+  destinationId: string;
+}> =>
+  matrix.cells
+    .filter((cell) => cell.status === 'unavailable')
+    .map((cell) => ({ originId: cell.originId, destinationId: cell.destinationId }))
+    .sort((left, right) => {
+      const originComparison = compareIds(left.originId, right.originId);
+      return originComparison !== 0
+        ? originComparison
+        : compareIds(left.destinationId, right.destinationId);
+    });
+
 /**
- * Build a deterministic nearest-neighbor order from a real route matrix.
+ * Build a deterministic nearest-neighbor order and its explanation from one real route matrix.
  * The result is intentionally a heuristic and is not guaranteed to be globally optimal.
  */
-export const calculateNearestNeighborOrder = (
-  matrix: RouteMatrixResult,
+export const calculateNearestNeighborOrderWithExplanation = (
+  inputMatrix: RouteMatrixResult,
   startId?: string,
   endId?: string,
-): RouteOrderResult => {
+): RouteOrderExplanationResult => {
+  const matrix = inputMatrix;
   const pointIds = matrix.points.map((point) => point.id);
   const uniquePointIds = new Set(pointIds);
   if (pointIds.length < 2 || uniquePointIds.size !== pointIds.length) {
@@ -98,28 +166,32 @@ export const calculateNearestNeighborOrder = (
   const cells = new Map(
     matrix.cells.map((cell) => [pairKey(cell.originId, cell.destinationId), cell]),
   );
+  const unavailablePairs = unavailablePairsFor(matrix);
   const orderedPointIds = [currentStartId];
   const visited = new Set([currentStartId]);
   const legs: RouteOrderLeg[] = [];
+  const decisions: RouteOrderDecisionExplanation[] = [];
 
   while (orderedPointIds.length < pointIds.length) {
     const currentId = orderedPointIds[orderedPointIds.length - 1];
+    if (currentId === undefined) {
+      throw new RouteOrderAlgorithmError(
+        'ROUTE_ORDER_UNAVAILABLE',
+        'No current point is available for the remaining route order',
+      );
+    }
+
     const remainingIds = pointIds.filter((id) => !visited.has(id));
-    const candidateIds =
-      endId !== undefined && remainingIds.length > 1
-        ? remainingIds.filter((id) => id !== endId)
-        : remainingIds;
-    const candidates = candidateIds
+    const heldEnd = endId !== undefined && remainingIds.length > 1;
+    const candidateIds = heldEnd ? remainingIds.filter((id) => id !== endId) : remainingIds;
+    const considered = candidateIds
       .map((destinationId) => {
         const estimate = availableEstimate(cells.get(pairKey(currentId, destinationId)));
         return estimate === undefined ? undefined : { id: destinationId, estimate };
       })
-      .filter(
-        (candidate): candidate is { id: string; estimate: RouteEstimate } =>
-          candidate !== undefined,
-      )
+      .filter((candidate): candidate is Candidate => candidate !== undefined)
       .sort(compareCandidates);
-    const next = candidates[0];
+    const next = considered[0];
     if (next === undefined) {
       throw new RouteOrderAlgorithmError(
         'ROUTE_ORDER_UNAVAILABLE',
@@ -127,12 +199,30 @@ export const calculateNearestNeighborOrder = (
       );
     }
 
+    const candidateExplanations = [...remainingIds]
+      .sort(compareIds)
+      .map((destinationId) =>
+        asCandidateExplanation(
+          destinationId,
+          cells.get(pairKey(currentId, destinationId)),
+          heldEnd && destinationId === endId,
+        ),
+      );
+    const fixedEnd = endId !== undefined && next.id === endId && remainingIds.length === 1;
+
     orderedPointIds.push(next.id);
     visited.add(next.id);
     legs.push({
       originId: currentId,
       destinationId: next.id,
       estimate: next.estimate,
+    });
+    decisions.push({
+      step: legs.length,
+      originId: currentId,
+      selectedDestinationId: next.id,
+      reason: decisionReason(next, considered, fixedEnd),
+      candidates: candidateExplanations,
     });
   }
 
@@ -143,7 +233,7 @@ export const calculateNearestNeighborOrder = (
     );
   }
 
-  const result: RouteOrderResult = {
+  const order: RouteOrderResult = {
     orderedPointIds,
     legs,
     totalDistanceMeters: legs.reduce(
@@ -163,5 +253,32 @@ export const calculateNearestNeighborOrder = (
     warnings: ['Nearest-neighbor ordering is deterministic but not globally optimal.'],
   };
 
-  return RouteOrderResultSchema.parse(result);
+  const parsedOrder = RouteOrderResultSchema.safeParse(order);
+  if (!parsedOrder.success) {
+    throw new RouteOrderAlgorithmError(
+      'ROUTE_ORDER_VALIDATION_ERROR',
+      'The generated route order is invalid',
+    );
+  }
+  const explanation: RouteOrderExplanationResult = {
+    order: parsedOrder.data,
+    decisions,
+    unavailablePairs,
+    algorithmNotice: ALGORITHM_NOTICE,
+  };
+  const parsedExplanation = RouteOrderExplanationResultSchema.safeParse(explanation);
+  if (!parsedExplanation.success) {
+    throw new RouteOrderAlgorithmError(
+      'ROUTE_ORDER_VALIDATION_ERROR',
+      'The generated route order explanation is invalid',
+    );
+  }
+  return parsedExplanation.data;
 };
+
+/** Build only the order while preserving the TASK-013 API. */
+export const calculateNearestNeighborOrder = (
+  matrix: RouteMatrixResult,
+  startId?: string,
+  endId?: string,
+): RouteOrderResult => calculateNearestNeighborOrderWithExplanation(matrix, startId, endId).order;

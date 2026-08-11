@@ -4,6 +4,7 @@ import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 import {
   ApiFailureSchema,
   LoginResultSchema,
+  RouteOrderExplanationResultSchema,
   RouteOrderResultSchema,
   createApiSuccessSchema,
 } from '@travel-guide/shared-schemas';
@@ -49,12 +50,14 @@ class FakeRouteProvider implements RouteProvider {
   public readonly name = 'fake';
   public readonly unavailablePairs = new Set<string>();
   public fail = false;
+  public calls = 0;
 
   public async estimateRoute(input: {
     origin: { location: { longitude: number; latitude: number } };
     destination: { location: { longitude: number; latitude: number } };
     mode: 'walking' | 'driving';
   }): Promise<RouteProviderResult | undefined> {
+    this.calls += 1;
     if (this.fail) throw new Error('provider failed');
     const pair = `${input.origin.location.longitude},${input.destination.location.longitude}`;
     if (this.unavailablePairs.has(pair)) return undefined;
@@ -190,6 +193,47 @@ describe('Route order API', () => {
     expect(envelope.data.orderedPointIds).toEqual(['start', 'middle', 'finish']);
     expect(envelope.data.legs).toHaveLength(2);
     expect(envelope.data.isOptimal).toBe(false);
+  });
+
+  it('returns one-pass explanations with matching order data and reuses two-point cache', async () => {
+    const token = await login();
+    repository.clear();
+    provider.fail = false;
+    provider.unavailablePairs.clear();
+    const first = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/routes/order/explain',
+        headers: { authorization: `Bearer ${token}`, 'x-request-id': 'explain-request-1' },
+        payload,
+      });
+    expect(first.statusCode).toBe(200);
+    expect(first.headers['x-request-id']).toBe('explain-request-1');
+    const firstEnvelope = createApiSuccessSchema(RouteOrderExplanationResultSchema).parse(
+      JSON.parse(first.payload),
+    );
+    expect(firstEnvelope.requestId).toBe('explain-request-1');
+    expect(firstEnvelope.data.order.orderedPointIds).toEqual(['start', 'middle', 'finish']);
+    expect(firstEnvelope.data.decisions).toHaveLength(2);
+    expect(firstEnvelope.data.decisions.every((decision) => decision.candidates.length > 0)).toBe(
+      true,
+    );
+    expect(firstEnvelope.data.algorithmNotice).toMatch(/nearest-neighbor/i);
+    const providerCallsAfterFirst = provider.calls;
+
+    const second = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/routes/order/explain',
+        headers: { authorization: `Bearer ${token}` },
+        payload,
+      });
+    expect(second.statusCode).toBe(200);
+    expect(provider.calls).toBe(providerCallsAfterFirst);
   });
 
   it('maps unavailable and systematic provider failures to stable errors', async () => {

@@ -1,8 +1,13 @@
 import {
   EstimateRouteOrderInputSchema,
+  RouteOrderExplanationResultSchema,
   RouteOrderResultSchema,
 } from '@travel-guide/shared-schemas';
-import type { EstimateRouteOrderInput, RouteOrderResult } from '@travel-guide/shared-types';
+import type {
+  EstimateRouteOrderInput,
+  RouteOrderExplanationResult,
+  RouteOrderResult,
+} from '@travel-guide/shared-types';
 
 import { AuthService, authService } from './auth.service';
 import { createHttpClient, requestApi, type HttpClient, type RequestOptions } from './http-client';
@@ -24,6 +29,18 @@ export class RouteOrderService {
       path: '/routes/order',
       data: parsedInput,
       schema: RouteOrderResultSchema,
+    });
+  }
+
+  public async estimateRouteOrderExplanation(
+    input: EstimateRouteOrderInput,
+  ): Promise<RouteOrderExplanationResult> {
+    const parsedInput = EstimateRouteOrderInputSchema.parse(input);
+    return this.request<RouteOrderExplanationResult>({
+      method: 'POST',
+      path: '/routes/order/explain',
+      data: parsedInput,
+      schema: RouteOrderExplanationResultSchema,
     });
   }
 

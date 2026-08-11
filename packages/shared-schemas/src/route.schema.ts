@@ -14,7 +14,13 @@ import {
   type RouteMatrixPoint,
   type RouteMatrixResult,
   type RouteOrderLeg,
+  type RouteOrderCandidateExplanation,
+  type RouteOrderCandidateStatus,
+  type RouteOrderDecisionExplanation,
+  type RouteOrderDecisionReason,
+  type RouteOrderExplanationResult,
   type RouteOrderResult,
+  type RouteOrderUnavailablePair,
   type RouteMode,
   type UnavailableRouteEstimate,
 } from '@travel-guide/shared-types';
@@ -474,6 +480,247 @@ export const RouteOrderResultSchema: z.ZodType<RouteOrderResult, z.ZodTypeDef, u
       });
     }
   });
+
+const ROUTE_ORDER_EXPLANATION_MAX_CANDIDATES = ROUTE_MATRIX_MAX_POINTS - 1;
+const ROUTE_ORDER_EXPLANATION_MAX_DECISIONS = ROUTE_MATRIX_MAX_POINTS - 1;
+const ROUTE_ORDER_EXPLANATION_MAX_UNAVAILABLE_PAIRS =
+  ROUTE_MATRIX_MAX_POINTS * (ROUTE_MATRIX_MAX_POINTS - 1);
+
+const routeOrderCandidateStatusSchema: z.ZodType<RouteOrderCandidateStatus, z.ZodTypeDef, unknown> =
+  z.enum(['available', 'unavailable']);
+
+const routeOrderDecisionReasonSchema: z.ZodType<RouteOrderDecisionReason, z.ZodTypeDef, unknown> =
+  z.enum([
+    'shortest_duration',
+    'shortest_distance_tiebreaker',
+    'destination_id_tiebreaker',
+    'fixed_end',
+  ]);
+
+const routeOrderExplanationCandidateIdSchema = routeMatrixPointIdSchema;
+const routeOrderRejectionReasonSchema = z.string().trim().min(1).max(160);
+
+const optionalNonNegativeIntegerSchema = nonNegativeIntegerSchema.optional();
+
+const routeOrderCandidateExplanationSchema: z.ZodType<
+  RouteOrderCandidateExplanation,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    destinationId: routeOrderExplanationCandidateIdSchema,
+    status: routeOrderCandidateStatusSchema,
+    durationSeconds: optionalNonNegativeIntegerSchema,
+    distanceMeters: optionalNonNegativeIntegerSchema,
+    rejectionReason: routeOrderRejectionReasonSchema.optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.status === 'available') {
+      if (value.durationSeconds === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['durationSeconds'],
+          message: 'available candidates require durationSeconds',
+        });
+      }
+      if (value.distanceMeters === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['distanceMeters'],
+          message: 'available candidates require distanceMeters',
+        });
+      }
+    } else {
+      if (value.durationSeconds !== undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['durationSeconds'],
+          message: 'unavailable candidates must not contain durationSeconds',
+        });
+      }
+      if (value.distanceMeters !== undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['distanceMeters'],
+          message: 'unavailable candidates must not contain distanceMeters',
+        });
+      }
+    }
+  });
+
+const routeOrderDecisionExplanationSchema: z.ZodType<
+  RouteOrderDecisionExplanation,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    step: z.number().finite().int().min(1).max(ROUTE_ORDER_EXPLANATION_MAX_DECISIONS),
+    originId: routeMatrixPointIdSchema,
+    selectedDestinationId: routeMatrixPointIdSchema,
+    reason: routeOrderDecisionReasonSchema,
+    candidates: z
+      .array(routeOrderCandidateExplanationSchema)
+      .min(1)
+      .max(ROUTE_ORDER_EXPLANATION_MAX_CANDIDATES),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const ids = new Set(value.candidates.map((candidate) => candidate.destinationId));
+    if (ids.size !== value.candidates.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['candidates'],
+        message: 'candidate destination ids must be unique',
+      });
+    }
+    if (!ids.has(value.selectedDestinationId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['selectedDestinationId'],
+        message: 'selected destination must be included in candidates',
+      });
+    }
+    if (value.originId === value.selectedDestinationId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['selectedDestinationId'],
+        message: 'decision must not contain a self-route',
+      });
+    }
+    const selected = value.candidates.find(
+      (candidate) => candidate.destinationId === value.selectedDestinationId,
+    );
+    if (selected?.status !== 'available') {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['selectedDestinationId'],
+        message: 'selected destination must be available',
+      });
+    }
+  });
+
+const routeOrderUnavailablePairSchema: z.ZodType<RouteOrderUnavailablePair, z.ZodTypeDef, unknown> =
+  z
+    .object({
+      originId: routeMatrixPointIdSchema,
+      destinationId: routeMatrixPointIdSchema,
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (value.originId === value.destinationId) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['destinationId'],
+          message: 'unavailable pairs must not contain self-routes',
+        });
+      }
+    });
+
+const routeOrderAlgorithmNoticeSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(256)
+  .refine((value) => /nearest[- ]neighbor/i.test(value), {
+    message: 'algorithmNotice must mention nearest-neighbor',
+  })
+  .refine(
+    (value) => /not globally optimal|does not guarantee (?:a )?globally optimal/i.test(value),
+    {
+      message: 'algorithmNotice must state that nearest-neighbor is not globally optimal',
+    },
+  );
+
+export const RouteOrderCandidateExplanationSchema = routeOrderCandidateExplanationSchema;
+export const RouteOrderDecisionExplanationSchema = routeOrderDecisionExplanationSchema;
+export const RouteOrderUnavailablePairSchema = routeOrderUnavailablePairSchema;
+
+export const RouteOrderExplanationResultSchema: z.ZodType<
+  RouteOrderExplanationResult,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    order: RouteOrderResultSchema,
+    decisions: z
+      .array(routeOrderDecisionExplanationSchema)
+      .max(ROUTE_ORDER_EXPLANATION_MAX_DECISIONS),
+    unavailablePairs: z
+      .array(routeOrderUnavailablePairSchema)
+      .max(ROUTE_ORDER_EXPLANATION_MAX_UNAVAILABLE_PAIRS),
+    algorithmNotice: routeOrderAlgorithmNoticeSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.decisions.length !== value.order.legs.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['decisions'],
+        message: 'decisions must match route order legs',
+      });
+    }
+
+    const orderedIds = new Set(value.order.orderedPointIds);
+    value.decisions.forEach((decision, index) => {
+      const leg = value.order.legs[index];
+      if (leg === undefined) return;
+      if (
+        decision.step !== index + 1 ||
+        decision.originId !== leg.originId ||
+        decision.selectedDestinationId !== leg.destinationId
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['decisions', index],
+          message: 'decision must match the corresponding route leg',
+        });
+      }
+      decision.candidates.forEach((candidate, candidateIndex) => {
+        if (!orderedIds.has(candidate.destinationId)) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['decisions', index, 'candidates', candidateIndex, 'destinationId'],
+            message: 'candidate must reference an ordered point',
+          });
+        }
+        if (candidate.destinationId === decision.originId) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['decisions', index, 'candidates', candidateIndex, 'destinationId'],
+            message: 'candidate must not reference the decision origin',
+          });
+        }
+      });
+    });
+
+    const pairs = new Set<string>();
+    value.unavailablePairs.forEach((pair, index) => {
+      const key = `${pair.originId}\u0000${pair.destinationId}`;
+      if (!orderedIds.has(pair.originId) || !orderedIds.has(pair.destinationId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['unavailablePairs', index],
+          message: 'unavailable pair must reference ordered points',
+        });
+      }
+      if (pairs.has(key)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['unavailablePairs', index],
+          message: 'unavailable pairs must be unique',
+        });
+      } else {
+        pairs.add(key);
+      }
+    });
+  });
+
+export {
+  ROUTE_ORDER_EXPLANATION_MAX_CANDIDATES,
+  ROUTE_ORDER_EXPLANATION_MAX_DECISIONS,
+  ROUTE_ORDER_EXPLANATION_MAX_UNAVAILABLE_PAIRS,
+};
 
 export { GeoPointSchema };
 

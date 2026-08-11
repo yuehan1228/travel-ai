@@ -91,6 +91,12 @@ API Key。
 `algorithm=nearest_neighbor` 和 `isOptimal=false`，总距离与总耗时只汇总真实矩阵中的可用路线。该算法不保证全局最优，
 不实现精确 TSP、动态规划、LLM 或地图展示；小程序 `RouteOrderService` 负责 Bearer Token 和共享 Schema 响应校验。
 
+访问顺序解释使用 `POST /routes/order/explain`，与普通顺序请求复用同一次真实路线矩阵和两点缓存查询。每个决策会列出可用候选
+的真实距离/耗时、不可用候选及排除原因，并明确说明最近邻启发式不保证全局最优；不可用候选不会携带伪造的距离或耗时。解释结果中的
+`order`、`decisions`、`legs` 和汇总字段由严格共享 Zod Schema 校验，Provider 系统性失败和无法覆盖全部点仍分别映射为稳定的
+`ROUTE_ORDER_PROVIDER_ERROR` 与 `ROUTE_ORDER_UNAVAILABLE`。小程序 `RouteOrderExplanationService` 复用现有认证和 HTTP Client，
+缺少 Token 时不会访问网络，Token 失效时清理认证状态。
+
 ### 旅行需求草稿 API（TASK-008）
 
 所有 `/trips` 请求都必须携带 `Authorization: Bearer <access-token>`。服务端从

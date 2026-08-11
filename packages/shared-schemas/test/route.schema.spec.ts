@@ -6,6 +6,7 @@ import {
   EstimateRouteOrderInputSchema,
   RouteEstimateSchema,
   RouteMatrixResultSchema,
+  RouteOrderExplanationResultSchema,
   RouteOrderResultSchema,
 } from '../src/route.schema';
 
@@ -230,6 +231,72 @@ describe('route schemas', () => {
     expect(
       RouteOrderResultSchema.safeParse({ ...result, legs: [{ ...result.legs[0], extra: true }] })
         .success,
+    ).toBe(false);
+  });
+
+  it('validates strict route-order explanations and protects unavailable measurements', () => {
+    const explanation = {
+      order: {
+        orderedPointIds: ['a', 'b'],
+        legs: [{ originId: 'a', destinationId: 'b', estimate: available }],
+        totalDistanceMeters: 1_234,
+        totalDurationSeconds: 600,
+        mode: 'walking' as const,
+        algorithm: 'nearest_neighbor' as const,
+        isOptimal: false as const,
+        generatedAt: '2026-08-11T00:00:00.000Z',
+        warnings: ['Nearest-neighbor ordering is deterministic but not globally optimal.'],
+      },
+      decisions: [
+        {
+          step: 1,
+          originId: 'a',
+          selectedDestinationId: 'b',
+          reason: 'shortest_duration' as const,
+          candidates: [
+            {
+              destinationId: 'b',
+              status: 'available' as const,
+              durationSeconds: 600,
+              distanceMeters: 1_234,
+            },
+          ],
+        },
+      ],
+      unavailablePairs: [],
+      algorithmNotice:
+        'Nearest-neighbor is deterministic but does not guarantee a globally optimal route.',
+    };
+    expect(RouteOrderExplanationResultSchema.safeParse(explanation).success).toBe(true);
+    expect(
+      RouteOrderExplanationResultSchema.safeParse({
+        ...explanation,
+        decisions: [
+          {
+            ...explanation.decisions[0],
+            candidates: [
+              {
+                destinationId: 'b',
+                status: 'unavailable' as const,
+                durationSeconds: 600,
+                distanceMeters: 1_234,
+              },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      RouteOrderExplanationResultSchema.safeParse({
+        ...explanation,
+        unexpected: true,
+      }).success,
+    ).toBe(false);
+    expect(
+      RouteOrderExplanationResultSchema.safeParse({
+        ...explanation,
+        algorithmNotice: 'A route was generated.',
+      }).success,
     ).toBe(false);
   });
 });

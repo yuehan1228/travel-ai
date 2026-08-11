@@ -108,7 +108,11 @@ export {
 export { RouteService } from './route.service';
 export { RouteMatrixService, ROUTE_MATRIX_MAX_CONCURRENCY } from './route-matrix.service';
 export { RouteOrderService } from './route-order.service';
-export { calculateNearestNeighborOrder, RouteOrderAlgorithmError } from './route-order.algorithm';
+export {
+  calculateNearestNeighborOrder,
+  calculateNearestNeighborOrderWithExplanation,
+  RouteOrderAlgorithmError,
+} from './route-order.algorithm';
 export type { RouteOrderAlgorithmErrorCode } from './route-order.algorithm';
 export type { RouteClock } from './route.clock';
 export type { RouteProvider, RouteProviderResult } from './providers/route.provider';

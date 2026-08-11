@@ -8,11 +8,16 @@ import type {
   EstimateRouteMatrixInput,
   EstimateRouteOrderInput,
   RouteMatrixResult,
+  RouteOrderExplanationResult,
   RouteOrderResult,
 } from '@travel-guide/shared-types';
 
 import { RouteException, RouteMatrixException, RouteOrderException } from './route.errors';
-import { calculateNearestNeighborOrder, RouteOrderAlgorithmError } from './route-order.algorithm';
+import {
+  calculateNearestNeighborOrder,
+  calculateNearestNeighborOrderWithExplanation,
+  RouteOrderAlgorithmError,
+} from './route-order.algorithm';
 import { RouteMatrixService } from './route-matrix.service';
 
 const validationError = (): RouteOrderException =>
@@ -52,23 +57,8 @@ export class RouteOrderService {
   ) {}
 
   public async estimateRouteOrder(input: EstimateRouteOrderInput): Promise<RouteOrderResult> {
-    const parsed = EstimateRouteOrderInputSchema.safeParse(input);
-    if (!parsed.success) throw validationError();
-
-    let matrix: RouteMatrixResult;
-    try {
-      const matrixInput: EstimateRouteMatrixInput = {
-        points: parsed.data.points,
-        mode: parsed.data.mode,
-      };
-      const matrixResult = await this.routeMatrixService.estimateRouteMatrix(matrixInput);
-      const validatedMatrix = RouteMatrixResultSchema.safeParse(matrixResult);
-      if (!validatedMatrix.success) throw providerError();
-      matrix = validatedMatrix.data;
-    } catch (error: unknown) {
-      throw mapMatrixError(error);
-    }
-
+    const parsed = this.parseInput(input);
+    const matrix = await this.getMatrix(parsed);
     try {
       return calculateNearestNeighborOrder(matrix, parsed.data.startId, parsed.data.endId);
     } catch (error: unknown) {
@@ -77,6 +67,50 @@ export class RouteOrderService {
         throw unavailableError();
       }
       throw providerError();
+    }
+  }
+
+  /** Generate an order and its per-step explanation from the same fetched matrix. */
+  public async estimateRouteOrderExplanation(
+    input: EstimateRouteOrderInput,
+  ): Promise<RouteOrderExplanationResult> {
+    const parsed = this.parseInput(input);
+    const matrix = await this.getMatrix(parsed);
+    try {
+      return calculateNearestNeighborOrderWithExplanation(
+        matrix,
+        parsed.data.startId,
+        parsed.data.endId,
+      );
+    } catch (error: unknown) {
+      if (error instanceof RouteOrderAlgorithmError) {
+        if (error.code === 'ROUTE_ORDER_VALIDATION_ERROR') throw validationError();
+        throw unavailableError();
+      }
+      throw providerError();
+    }
+  }
+
+  private parseInput(input: EstimateRouteOrderInput): {
+    data: EstimateRouteOrderInput;
+  } {
+    const parsed = EstimateRouteOrderInputSchema.safeParse(input);
+    if (!parsed.success) throw validationError();
+    return parsed;
+  }
+
+  private async getMatrix(parsed: { data: EstimateRouteOrderInput }): Promise<RouteMatrixResult> {
+    try {
+      const matrixInput: EstimateRouteMatrixInput = {
+        points: parsed.data.points,
+        mode: parsed.data.mode,
+      };
+      const matrixResult = await this.routeMatrixService.estimateRouteMatrix(matrixInput);
+      const validatedMatrix = RouteMatrixResultSchema.safeParse(matrixResult);
+      if (!validatedMatrix.success) throw providerError();
+      return validatedMatrix.data;
+    } catch (error: unknown) {
+      throw mapMatrixError(error);
     }
   }
 }
