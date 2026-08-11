@@ -56,6 +56,9 @@ importers:
       '@travel-guide/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@travel-guide/prompts':
+        specifier: workspace:*
+        version: link:../../packages/prompts
       '@travel-guide/shared-schemas':
         specifier: workspace:*
         version: link:../../packages/shared-schemas
@@ -93,7 +96,11 @@ importers:
 
   packages/config: {}
 
-  packages/prompts: {}
+  packages/prompts:
+    dependencies:
+      '@travel-guide/shared-types':
+        specifier: workspace:*
+        version: link:../shared-types
 
   packages/shared-schemas:
     dependencies:

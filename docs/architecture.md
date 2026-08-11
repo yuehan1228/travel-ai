@@ -7,7 +7,7 @@
 - `apps/server`：NestJS + Fastify 的后端应用入口，负责 HTTP 接口、配置校验、数据库模块以及应用编排。
 - `packages/shared-types`：前后端共享的 TypeScript 类型定义。
 - `packages/shared-schemas`：使用 Zod 定义的运行时数据校验 Schema。
-- `packages/prompts`：后续 AI 能力使用的提示词（prompt）共享包；当前仅保留包边界。
+- `packages/prompts`：版本化 AI 提示词（prompt）共享包；当前包含 TripPlan Structured Output Prompt。
 - `packages/config`：跨应用共享的基础配置常量和环境类型。
 - `infra/docker`：本地基础设施容器编排，目前只包含 PostgreSQL 和 Redis。
 
@@ -137,7 +137,7 @@ Schema，缺少 Token 时不访问网络并在 `AUTH_TOKEN_INVALID` 时清理认
 ### 当前能力边界
 
 旅行草稿 CRUD、基础天气查询、POI 检索、两点路线估算、路线矩阵和确定性的访问顺序建议是当前服务端旅行业务能力。精确路线
-优化、地图 UI、攻略生成和 AI（LLM）能力留待后续任务；共享包仅提供严格的 TripPlan 结构化契约和 Runtime Schema，Schema 不证明 `providerPlaceId` 等实体真实性，真实性白名单校验由后续生成编排负责；天气、地点和路线模块不创建 TripPlan 实例、Timeline 或攻略生成逻辑。
+优化、地图 UI 和公共攻略生成 API 留待后续任务；TASK-016 仅提供服务端内部的 LLM Provider、版本化 Prompt 和 TripPlan 生成编排基础层。共享包提供严格的 TripPlan 结构化契约和 Runtime Schema，Schema 不证明 `providerPlaceId` 等实体真实性，真实性白名单校验由生成编排执行；天气、地点和路线模块不创建 TripPlan 实例、Timeline 或攻略生成逻辑。
 
 Migration 不会在应用启动时自动执行，也没有重置或删除生产表脚本。启动本地 PostgreSQL
 后，复制 `.env.example` 为 `.env` 并运行：
@@ -151,3 +151,19 @@ pnpm --filter @travel-guide/server db:migrate
 使用 `pnpm --filter @travel-guide/server db:generate` 生成新的可审阅 SQL。UUID 由应用使用
 Node.js `crypto.randomUUID()` 生成，数据库列不声明 UUID 扩展或默认表达式，因此 Migration
 不依赖未声明的 PostgreSQL 扩展。
+
+### TripPlan 生成编排（TASK-016）
+
+`TripPlanModule` 只提供服务端内部的 `TripPlanGenerationService`，不注册生成 Controller，也不保存攻略数据库版本。
+服务通过 `TRIP_PLAN_LLM_PROVIDER` Injection Token 依赖最小 `LLMProvider` 接口；默认实现是无 SDK 依赖的
+OpenAI-compatible Chat Completions Provider，测试使用 `FakeLLMProvider`。`LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`、
+超时和输出上限只从服务端运行时配置读取；生产 Base URL 必须是 HTTPS，开发/测试使用本地 HTTP 时必须显式设置
+`LLM_ALLOW_INSECURE_LOCALHOST=true`。请求失败、超时和供应商非成功状态均映射为脱敏错误，不记录 Authorization、API Key、
+完整 Prompt、用户自由文本或供应商原始响应。
+
+生成 Context 仅允许经过 `CreateTripInputSchema`、`DailyWeatherSchema`、`PlaceSchema`、`RouteEstimateSchema` 和
+`RouteOrderResultSchema` 验证的数据。编排层在单次 Provider 调用前确定性截断最多 30 个候选 POI，并在返回后先使用
+`TripPlanSchema`，再对 POI 的 provider/providerPlaceId/id/所有真实字段、路线和天气执行精确白名单匹配；任何新增、篡改或
+unavailable 路线作为交通耗时都会稳定失败。`climate_reference` 天气必须原样保留并带有
+`WEATHER_CLIMATE_REFERENCE` warning；unavailable 天气不能携带测量值。没有已验证 POI 时返回 `TRIP_PLAN_UNAVAILABLE`。
+该层不主动调用地图、天气或路线 Provider，不执行自动修复或多轮 Agent。

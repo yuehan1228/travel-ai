@@ -9,6 +9,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@travel-guide/config': resolve(serverDirectory, '../../packages/config/src/index.ts'),
+      '@travel-guide/prompts': resolve(serverDirectory, '../../packages/prompts/src/index.ts'),
       '@travel-guide/shared-schemas': resolve(
         serverDirectory,
         '../../packages/shared-schemas/src/index.ts',

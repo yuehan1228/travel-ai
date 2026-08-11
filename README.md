@@ -83,11 +83,15 @@ API Key。
 逐条复用 `RouteService` 和公共两点缓存，最多并发 4 个查询；单条路线不可用时仅标记对应 cell，不伪造距离、时长或
 费用。全部路线均不可用时返回 `ROUTE_MATRIX_UNAVAILABLE`，输入和 Provider 系统性失败分别返回稳定的矩阵错误码。
 小程序 `RouteMatrixService` 复用现有 Bearer Token、HTTP Client 和共享 Zod Schema。多途经点优化（TSP）、公交详情、
-地图 UI 和 LLM 仍未实现。
+地图 UI 和 LLM 公共生成接口仍未实现。
 
 共享包现已提供严格的 `TripPlan`、`TripPlanDay` 和 `TripPlanItem` 结构化契约，用于后续 AI
 Structured Output 与小程序 Runtime 校验；Schema 只能校验来源字段的一致性，`providerPlaceId` 等实体真实性白名单
-仍需由后续生成编排基于已验证的 POI 数据执行；当前不包含攻略生成接口、LLM 调用或攻略页面。
+仍需由服务端生成编排基于已验证的 POI 数据执行。TASK-016 增加了不暴露 HTTP 接口的
+`TripPlanGenerationService`、可替换 `LLMProvider`、Fake Provider 和版本化 Prompt；服务只接受经过严格
+校验的天气、POI 和路线 Context，最多向模型提供 30 个候选 POI，并在返回后再次校验 TripPlan、Place、RouteEstimate
+和天气白名单。OpenAI-compatible Provider 只从服务端 `LLM_*` 配置读取 Host、API Key 和模型，设置请求超时，供应商
+原始响应和 Prompt 不写入日志；测试只使用 Fake Provider。当前仍不包含攻略生成接口、数据库表或攻略页面。
 
 访问顺序建议使用需要认证的 `POST /routes/order`，在真实路线矩阵上运行确定性的最近邻（nearest-neighbor）贪心算法。
 请求可指定 `startId` 和 `endId`；未指定起点时按点 ID 字典序选择，候选路线按预计耗时、距离和目标 ID 依次打破平局，
@@ -186,34 +190,40 @@ infra/docker/       本地 PostgreSQL、Redis 编排
 
 ## 环境变量
 
-| 变量                                                  | 用途                                         |
-| ----------------------------------------------------- | -------------------------------------------- |
-| `NODE_ENV`                                            | `development`、`test` 或 `production`        |
-| `PORT`                                                | 后端监听端口                                 |
-| `POSTGRES_HOST` / `POSTGRES_PORT`                     | PostgreSQL 地址和端口                        |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | 本地 PostgreSQL 配置                         |
-| `POSTGRES_SSL`                                        | 是否启用 PostgreSQL SSL（`true`/`false`）    |
-| `POSTGRES_POOL_MIN` / `POSTGRES_POOL_MAX`             | 连接池最小/最大连接数                        |
-| `POSTGRES_IDLE_TIMEOUT_MS`                            | 空闲连接超时（毫秒）                         |
-| `POSTGRES_CONNECTION_TIMEOUT_MS`                      | 建立连接超时（毫秒）                         |
-| `REDIS_HOST` / `REDIS_PORT`                           | Redis 地址和端口                             |
-| `REDIS_USERNAME` / `REDIS_PASSWORD` / `REDIS_DB`      | 本地 Redis 配置                              |
-| `WECHAT_APP_ID` / `WECHAT_APP_SECRET`                 | 服务端微信 Code2Session 配置                 |
-| `JWT_ACCESS_SECRET`                                   | 服务端 Access Token 密钥（至少 32 字符）     |
-| `JWT_ACCESS_EXPIRES_IN_SECONDS`                       | Access Token 有效期（300～86400 秒）         |
-| `WEATHER_PROVIDER`                                    | 服务端天气 Provider 名称（默认 `amap`）      |
-| `WEATHER_API_KEY`                                     | 服务端天气 Provider API Key                  |
-| `WEATHER_REQUEST_TIMEOUT_MS`                          | 天气供应商请求超时（500～30000 毫秒）        |
-| `WEATHER_FORECAST_HORIZON_DAYS`                       | 预报有效天数（1～14 天）                     |
-| `PLACE_PROVIDER`                                      | 服务端地点 Provider（当前仅 `amap`）         |
-| `PLACE_API_KEY`                                       | 服务端地图/POI Provider API Key              |
-| `PLACE_REQUEST_TIMEOUT_MS`                            | 地点供应商请求超时（500～30000 毫秒）        |
-| `PLACE_CACHE_TTL_SECONDS`                             | POI 搜索缓存 TTL（60 秒～7 天）              |
-| `ROUTE_PROVIDER`                                      | 路线 Provider（当前仅 `amap`）               |
-| `ROUTE_API_KEY`                                       | 服务端路线 Provider API Key                  |
-| `ROUTE_REQUEST_TIMEOUT_MS`                            | 路线供应商请求超时（500～30000 毫秒）        |
-| `ROUTE_CACHE_TTL_SECONDS`                             | 路线缓存 TTL（60 秒～7 天）                  |
-| `ROUTE_STALE_IF_ERROR_SECONDS`                        | Provider 失败时可使用旧缓存的窗口（0～7 天） |
+| 变量                                                  | 用途                                            |
+| ----------------------------------------------------- | ----------------------------------------------- |
+| `NODE_ENV`                                            | `development`、`test` 或 `production`           |
+| `PORT`                                                | 后端监听端口                                    |
+| `POSTGRES_HOST` / `POSTGRES_PORT`                     | PostgreSQL 地址和端口                           |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | 本地 PostgreSQL 配置                            |
+| `POSTGRES_SSL`                                        | 是否启用 PostgreSQL SSL（`true`/`false`）       |
+| `POSTGRES_POOL_MIN` / `POSTGRES_POOL_MAX`             | 连接池最小/最大连接数                           |
+| `POSTGRES_IDLE_TIMEOUT_MS`                            | 空闲连接超时（毫秒）                            |
+| `POSTGRES_CONNECTION_TIMEOUT_MS`                      | 建立连接超时（毫秒）                            |
+| `REDIS_HOST` / `REDIS_PORT`                           | Redis 地址和端口                                |
+| `REDIS_USERNAME` / `REDIS_PASSWORD` / `REDIS_DB`      | 本地 Redis 配置                                 |
+| `WECHAT_APP_ID` / `WECHAT_APP_SECRET`                 | 服务端微信 Code2Session 配置                    |
+| `JWT_ACCESS_SECRET`                                   | 服务端 Access Token 密钥（至少 32 字符）        |
+| `JWT_ACCESS_EXPIRES_IN_SECONDS`                       | Access Token 有效期（300～86400 秒）            |
+| `WEATHER_PROVIDER`                                    | 服务端天气 Provider 名称（默认 `amap`）         |
+| `WEATHER_API_KEY`                                     | 服务端天气 Provider API Key                     |
+| `WEATHER_REQUEST_TIMEOUT_MS`                          | 天气供应商请求超时（500～30000 毫秒）           |
+| `WEATHER_FORECAST_HORIZON_DAYS`                       | 预报有效天数（1～14 天）                        |
+| `PLACE_PROVIDER`                                      | 服务端地点 Provider（当前仅 `amap`）            |
+| `PLACE_API_KEY`                                       | 服务端地图/POI Provider API Key                 |
+| `PLACE_REQUEST_TIMEOUT_MS`                            | 地点供应商请求超时（500～30000 毫秒）           |
+| `PLACE_CACHE_TTL_SECONDS`                             | POI 搜索缓存 TTL（60 秒～7 天）                 |
+| `ROUTE_PROVIDER`                                      | 路线 Provider（当前仅 `amap`）                  |
+| `ROUTE_API_KEY`                                       | 服务端路线 Provider API Key                     |
+| `ROUTE_REQUEST_TIMEOUT_MS`                            | 路线供应商请求超时（500～30000 毫秒）           |
+| `ROUTE_CACHE_TTL_SECONDS`                             | 路线缓存 TTL（60 秒～7 天）                     |
+| `ROUTE_STALE_IF_ERROR_SECONDS`                        | Provider 失败时可使用旧缓存的窗口（0～7 天）    |
+| `LLM_PROVIDER`                                        | 服务端 LLM Provider（当前 `openai_compatible`） |
+| `LLM_BASE_URL` / `LLM_API_KEY`                        | 服务端 LLM Host 和密钥（仅服务端）              |
+| `LLM_MODEL`                                           | 服务端模型名称                                  |
+| `LLM_REQUEST_TIMEOUT_MS`                              | LLM 请求超时（500～120000 毫秒）                |
+| `LLM_MAX_OUTPUT_TOKENS`                               | Structured Output 最大 token 数（128～16384）   |
+| `LLM_ALLOW_INSECURE_LOCALHOST`                        | 仅开发/测试显式允许本地 HTTP（生产必须 HTTPS）  |
 
 微信登录流程为：小程序调用 `wx.login()` 获取一次性 code，调用 `POST /auth/login`；服务端
 通过固定的微信 Code2Session URL 换取 OpenID，按 OpenID 幂等创建 users 记录，再签发应用
@@ -223,7 +233,7 @@ infra/docker/       本地 PostgreSQL、Redis 编排
 服务端测试通过注入 Fake WechatProvider 和 Fake UserRepository 完成，不访问真实微信接口、
 网络或 PostgreSQL。小程序只保存版本化的 Access Token 和最小用户资料，损坏缓存会被清除；
 不会保存 code、OpenID、UnionID、session_key 或任何服务端密钥。当前没有 Refresh Token、
-手机号/头像昵称授权、攻略生成、地图 UI、路线优化或 LLM 能力；当前路线模块只提供受认证保护的两点真实路线估算，POI 仅提供受认证保护的检索基础层，天气参考不等同于准确预报，首页仍保持 TASK-004
+手机号/头像昵称授权、公共攻略生成 API、地图 UI 或路线优化；TASK-016 的 LLM Provider 和生成编排仅供服务端内部使用，当前路线模块只提供受认证保护的两点真实路线估算，POI 仅提供受认证保护的检索基础层，天气参考不等同于准确预报，首页仍保持 TASK-004
 的本地旅行表单和草稿行为。
 
 不要将 `.env`、真实密码、微信 AppSecret、JWT Secret、天气/地图/LLM API Key 提交到仓库；天气

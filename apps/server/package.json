@@ -18,6 +18,7 @@
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-fastify": "^11.0.0",
     "@travel-guide/config": "workspace:*",
+    "@travel-guide/prompts": "workspace:*",
     "@travel-guide/shared-schemas": "workspace:*",
     "@travel-guide/shared-types": "workspace:*",
     "drizzle-orm": "^0.45.2",

@@ -30,6 +30,13 @@ import type { RouteProvider } from './modules/routes/providers/route.provider';
 import type { RouteCacheRepository } from './modules/routes/repositories/route-cache.repository';
 import type { RouteClock } from './modules/routes/route.clock';
 import { RouteModule, type RouteModuleOptions } from './modules/routes/route.module';
+import {
+  createTestLlmEnvironment,
+  loadLlmEnvironment,
+  type LlmEnvironment,
+} from './modules/trip-plan/config/llm-environment';
+import type { LLMFetch, LLMProvider } from './modules/trip-plan/providers';
+import { TripPlanModule } from './modules/trip-plan/trip-plan.module';
 
 export { ENVIRONMENT_CONFIG } from './config/tokens';
 
@@ -49,6 +56,9 @@ export interface AppModuleOptions
   readonly routeCacheRepository?: RouteCacheRepository;
   readonly routeClock?: RouteClock;
   readonly routeFetch?: RouteModuleOptions['routeFetch'];
+  readonly llmEnvironment?: LlmEnvironment;
+  readonly llmProvider?: LLMProvider;
+  readonly llmFetch?: LLMFetch;
 }
 
 @Module({
@@ -69,6 +79,9 @@ export class AppModule {
     const routeEnvironment =
       options.routeEnvironment ??
       (environment.nodeEnv === 'test' ? createTestRouteEnvironment() : loadRouteEnvironment());
+    const llmEnvironment =
+      options.llmEnvironment ??
+      (environment.nodeEnv === 'test' ? createTestLlmEnvironment() : loadLlmEnvironment());
 
     return {
       module: AppModule,
@@ -100,6 +113,11 @@ export class AppModule {
           routeClock: options.routeClock,
           routeFetch: options.routeFetch,
           databaseEnvironment: options.databaseEnvironment,
+        }),
+        TripPlanModule.register({
+          llmEnvironment,
+          llmProvider: options.llmProvider,
+          llmFetch: options.llmFetch,
         }),
       ],
       controllers: extraControllers,
