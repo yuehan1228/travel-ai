@@ -151,6 +151,21 @@ Trip/版本使用统一的脱敏错误。稳定错误包括 `TRIP_NOT_FOUND`、`
 整单生成、单日重生成和恢复共用 Trip 行级原子 `generating` reservation，仍不使用 LLM、Redis、队列或后台任务。小程序详情页提供两个 ready
 版本的普通文本差异查看和历史版本恢复入口，恢复加载或失败时保留当前攻略，认证失效仍由 `AuthService` 清理 Token。
 
+### TripPlan 受控内容编辑（TASK-021）
+
+`PATCH /trips/:id/plan/:version` 只接受与 URL 版本一致的严格 `EditTripPlanInput`。编辑请求必须包含
+`sourceVersion`，且至少修改一项白名单内容：计划 `summary`；每日的 `summary` 或结构化 `warnings`；行程条目的
+`description`、`recommendationReason`、`tips` 或 `estimatedCostCny`。日号和条目 ID 必须唯一且
+存在，未知字段以及 `place`、`route`、`dataSources`、`generatedAt`、`schemaVersion`、预算分类汇总等事实字段一律拒绝。
+
+服务端通过纯 `applyTripPlanEdits` 在内存中复制 ready 快照，严格重新校验完整 `TripPlanSchema`，按条目金额重算每日和分类/总预算，
+并由服务端生成新的 `generatedAt`；源快照、历史版本、日和条目从不修改。不存在实体统一返回 `TRIP_PLAN_ENTITY_MISMATCH`，污染快照或无实际变化使用稳定错误；无实际变化在 reservation 前验证，不创建新版本。编辑不调用
+LLM、天气、POI 或路线 Provider。编辑与生成、单日重生成、恢复共用 `operation='edit'` 的 Trip 行级原子 reservation；成功事务保存递增的新
+不可变版本，失败仅保留 `failed` 元数据并恢复原 `ready` 状态。
+
+小程序 `TripPlanService.editTripPlanVersion` 和攻略详情页仅在 ready 版本显示摘要、行程描述/推荐理由/小贴士/金额编辑入口，不提供 warnings 编辑控件，使用单飞提交；成功切换到新版本，失败保留
+当前攻略和输入草稿，`AUTH_TOKEN_INVALID` 继续由 `AuthService` 清理。当前仍不实现聊天、地图、分享、实时价格或多人协作。
+
 访问顺序建议使用需要认证的 `POST /routes/order`，在真实路线矩阵上运行确定性的最近邻（nearest-neighbor）贪心算法。
 请求可指定 `startId` 和 `endId`；未指定起点时按点 ID 字典序选择，候选路线按预计耗时、距离和目标 ID 依次打破平局，
 并将指定终点保留到最后。不可用的两点路线不会参与候选；若无法覆盖全部点则返回 `ROUTE_ORDER_UNAVAILABLE`。结果明确标记

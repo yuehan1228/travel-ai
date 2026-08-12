@@ -17,6 +17,10 @@ import {
   type GenerateTripPlanInput,
   type RegenerateTripPlanDayInput,
   type RegenerateTripPlanDayResult,
+  type EditTripPlanInput,
+  type EditTripPlanDayInput,
+  type EditTripPlanItemInput,
+  type EditTripPlanResult,
   type TripPlanGenerationResult,
   type TripPlanVersionListResult,
   type TripPlanVersionStatus,
@@ -692,6 +696,170 @@ const positiveSafeIntegerSchema = z
   .int({ message: 'value must be an integer' })
   .min(1, { message: 'value must be at least 1' })
   .max(2_147_483_647, { message: 'value is too large' });
+
+const editText = (fieldName: string, maxLength: number) =>
+  createTrimmedRequiredStringSchema(fieldName, maxLength);
+
+const editWarningsSchema: z.ZodType<TripPlanWarning[], z.ZodTypeDef, unknown> = z
+  .array(TripPlanWarningSchema)
+  .max(MAX_TRIP_PLAN_WARNINGS_PER_DAY)
+  .refine(
+    (warnings) =>
+      new Set(warnings.map((warning) => JSON.stringify(warning))).size === warnings.length,
+    {
+      message: 'warnings must not contain duplicates',
+    },
+  );
+
+const editTipsSchema: z.ZodType<string[], z.ZodTypeDef, unknown> = z
+  .array(editText('tip', 500))
+  .max(MAX_TRIP_PLAN_TIPS)
+  .refine((tips) => new Set(tips).size === tips.length, {
+    message: 'tips must not contain duplicates',
+  });
+
+/** Strict, controlled request for editing one ready immutable TripPlan version. */
+export const EditTripPlanDayInputSchema: z.ZodType<EditTripPlanDayInput, z.ZodTypeDef, unknown> = z
+  .object({
+    dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
+    summary: editText('summary', 2_000).optional(),
+    warnings: editWarningsSchema.optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.summary === undefined && value.warnings === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: 'each day edit must change at least one whitelisted field',
+      });
+    }
+  });
+
+/** Strict, controlled request for editing one existing timeline item. */
+export const EditTripPlanItemInputSchema: z.ZodType<EditTripPlanItemInput, z.ZodTypeDef, unknown> =
+  z
+    .object({
+      dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
+      itemId: z.string().uuid(),
+      description: editText('description', 2_000).optional(),
+      recommendationReason: editText('recommendationReason', 1_000).optional(),
+      tips: editTipsSchema.optional(),
+      estimatedCostCny: moneySchema.optional(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (
+        value.description === undefined &&
+        value.recommendationReason === undefined &&
+        value.tips === undefined &&
+        value.estimatedCostCny === undefined
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [],
+          message: 'each item edit must change at least one whitelisted field',
+        });
+      }
+    });
+
+export const EditTripPlanInputSchema: z.ZodType<EditTripPlanInput, z.ZodTypeDef, unknown> = z
+  .object({
+    sourceVersion: positiveSafeIntegerSchema,
+    summary: editText('summary', 4_000).optional(),
+    dayEdits: z.array(EditTripPlanDayInputSchema).max(MAX_TRIP_PLAN_DAYS).optional(),
+    itemEdits: z
+      .array(EditTripPlanItemInputSchema)
+      .max(MAX_TRIP_PLAN_ITEMS_PER_DAY * MAX_TRIP_PLAN_DAYS)
+      .optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const dayEdits = value.dayEdits ?? [];
+    const itemEdits = value.itemEdits ?? [];
+    if (value.summary === undefined && dayEdits.length === 0 && itemEdits.length === 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: 'at least one edit is required',
+      });
+    }
+    const dayNumbers = new Set<number>();
+    dayEdits.forEach((edit, index) => {
+      if (dayNumbers.has(edit.dayNumber)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['dayEdits', index, 'dayNumber'],
+          message: 'dayEdits must not contain duplicate dayNumber values',
+        });
+      }
+      dayNumbers.add(edit.dayNumber);
+    });
+    const itemIds = new Set<string>();
+    itemEdits.forEach((edit, index) => {
+      const itemKey = `${edit.dayNumber}:${edit.itemId}`;
+      if (itemIds.has(itemKey)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['itemEdits', index, 'itemId'],
+          message: 'itemEdits must not contain duplicate dayNumber/itemId pairs',
+        });
+      }
+      itemIds.add(itemKey);
+    });
+  });
+
+/** Complete immutable ready result returned by PATCH /trips/:id/plan/:version. */
+export const EditTripPlanResultSchema: z.ZodType<EditTripPlanResult, z.ZodTypeDef, unknown> = z
+  .object({
+    tripId: z.string().uuid(),
+    sourceVersion: positiveSafeIntegerSchema,
+    version: positiveSafeIntegerSchema,
+    status: z.literal('ready'),
+    plan: TripPlanSchema,
+    summary: TripPlanVersionSummarySchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.version <= value.sourceVersion) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['version'],
+        message: 'edit must create a strictly newer version',
+      });
+    }
+    if (value.summary.version !== value.version) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['version'],
+        message: 'version must match summary.version',
+      });
+    }
+    if (value.summary.status !== 'ready') {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['summary', 'status'],
+        message: 'edited summary must be ready',
+      });
+    }
+    if (value.summary.tripId !== value.tripId || value.plan.tripId !== value.tripId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['tripId'],
+        message: 'edited result trip ids must match',
+      });
+    }
+    if (
+      value.summary.generatedAt === undefined ||
+      value.plan.generatedAt !== value.summary.generatedAt
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan', 'generatedAt'],
+        message: 'edited plan generatedAt must match summary.generatedAt',
+      });
+    }
+  });
 
 /** Strict, normalized request body for POST /trips/:id/regenerate-day. */
 export const RegenerateTripPlanDayInputSchema: z.ZodType<

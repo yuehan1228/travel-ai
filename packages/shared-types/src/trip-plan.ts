@@ -154,3 +154,48 @@ export interface RegenerateTripPlanDayResult extends TripPlanGenerationResult {
   readonly sourceVersion: number;
   readonly dayNumber: number;
 }
+
+/** A controlled, user-authored change request for one immutable ready snapshot. */
+export interface EditTripPlanInput {
+  readonly sourceVersion: number;
+  readonly summary?: string;
+  readonly dayEdits?: EditTripPlanDayInput[];
+  readonly itemEdits?: EditTripPlanItemInput[];
+}
+
+/** Fields that may be changed on a plan day. All other day fields are derived or immutable. */
+export interface EditTripPlanDayInput {
+  readonly dayNumber: number;
+  readonly summary?: string;
+  readonly warnings?: TripPlanWarning[];
+}
+
+/** Fields that may be changed on a timeline item. Entity facts remain immutable. */
+export interface EditTripPlanItemInput {
+  readonly dayNumber: number;
+  readonly itemId: string;
+  readonly description?: string;
+  readonly recommendationReason?: string;
+  readonly tips?: string[];
+  readonly estimatedCostCny?: number;
+}
+
+/** Result of materialising a controlled edit as a new immutable ready version. */
+export interface EditTripPlanResult {
+  readonly tripId: string;
+  readonly sourceVersion: number;
+  readonly version: number;
+  readonly status: 'ready';
+  readonly plan: TripPlan;
+  readonly summary: TripPlanVersionSummary;
+}
+
+/** Public names for the edit whitelist; values are intentionally not user-extensible. */
+export const TRIP_PLAN_EDITABLE_DAY_FIELDS = ['summary', 'warnings'] as const;
+
+export const TRIP_PLAN_EDITABLE_ITEM_FIELDS = [
+  'description',
+  'recommendationReason',
+  'tips',
+  'estimatedCostCny',
+] as const;

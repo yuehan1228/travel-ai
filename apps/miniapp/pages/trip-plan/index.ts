@@ -1,19 +1,23 @@
 import type {
+  EditTripPlanInput,
   RegenerateTripPlanDayInput,
   TripPlanVersionSummary,
   TripPlanVersionDiffResult,
 } from '@travel-guide/shared-types';
+import { EditTripPlanInputSchema } from '@travel-guide/shared-schemas';
 
 import { tripPlanService } from '../../services/trip-plan.service';
 import {
   applyLatestTripPlanResult,
   applyTripPlanDayRegenerationResult,
+  applyTripPlanEditResult,
   applyTripPlanDiffResult,
   applyTripPlanVersionRestoreResult,
   applyTripPlanViewError,
   applyTripPlanVersionResult,
   beginTripPlanLoad,
   beginTripPlanDayRegeneration,
+  beginTripPlanEdit,
   beginTripPlanDiff,
   beginTripPlanVersionSwitch,
   beginTripPlanVersionRestore,
@@ -62,13 +66,29 @@ interface TripPlanPageData {
   diffVersionLabels: string[];
   isDiffLoading: boolean;
   restoringVersion?: number;
+  isEditing: boolean;
+  editSummary: string;
+  editDayDrafts: Record<string, { summary: string }>;
+  editItemDrafts: Record<
+    string,
+    { description: string; recommendationReason: string; tips: string; estimatedCostCny: string }
+  >;
 }
 
 type TripPlanPageDisplayModel = Omit<TripPlanDisplayModel, 'days'> & {
   days: Array<
-    TripPlanDisplayModel['days'][number] & {
+    Omit<TripPlanDisplayModel['days'][number], 'items'> & {
       regenerateInstruction: string;
       isRegenerating: boolean;
+      editSummary: string;
+      items: Array<
+        TripPlanDisplayModel['days'][number]['items'][number] & {
+          editDescription: string;
+          editRecommendationReason: string;
+          editTips: string;
+          editEstimatedCostCny: string;
+        }
+      >;
     }
   >;
 };
@@ -117,6 +137,18 @@ const syncPage = (
             ...day,
             regenerateInstruction: page.data.regenerateInstructions[String(day.dayNumber)] ?? '',
             isRegenerating: state.regeneratingDay === day.dayNumber,
+            editSummary: page.data.editDayDrafts[String(day.dayNumber)]?.summary ?? day.summary,
+            items: day.items.map((item) => {
+              const draft = page.data.editItemDrafts[`${day.dayNumber}:${item.id}`];
+              return {
+                ...item,
+                editDescription: draft?.description ?? item.description,
+                editRecommendationReason: draft?.recommendationReason ?? item.recommendationReason,
+                editTips: draft?.tips ?? item.tips.join('\n'),
+                editEstimatedCostCny:
+                  draft?.estimatedCostCny ?? item.estimatedCostText.replace(/^¥/, ''),
+              };
+            }),
           })),
         };
   page.setData({
@@ -141,6 +173,10 @@ const syncPage = (
     diffVersionLabels: readyVersions.map((item) => item.label),
     isDiffLoading: state.isDiffLoading,
     restoringVersion: state.restoringVersion,
+    isEditing: state.isEditing,
+    editSummary: page.data.editSummary || display?.summary || '',
+    editDayDrafts: page.data.editDayDrafts,
+    editItemDrafts: page.data.editItemDrafts,
   });
 };
 
@@ -261,6 +297,188 @@ const regenerateDay = async (
   }
 };
 
+type EditDayField = 'summary';
+type EditItemField = 'description' | 'recommendationReason' | 'tips' | 'estimatedCostCny';
+
+const editDayNumberFromEvent = (event: TripPlanPageEvent): number | undefined => {
+  const value = event.currentTarget?.dataset?.dayNumber;
+  if (value === undefined || !/^\d+$/.test(value)) return undefined;
+  const dayNumber = Number(value);
+  return Number.isSafeInteger(dayNumber) && dayNumber >= 1 && dayNumber <= 14
+    ? dayNumber
+    : undefined;
+};
+
+const updateEditSummary = (
+  page: PageInstance<TripPlanPageData>,
+  event: TripPlanPageEvent,
+): void => {
+  const value = event.detail?.value;
+  if (value === undefined) return;
+  page.setData({ editSummary: value.slice(0, 4_000) });
+};
+
+const updateEditDay = (page: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void => {
+  const dayNumber = editDayNumberFromEvent(event);
+  const field = event.currentTarget?.dataset?.field as EditDayField | undefined;
+  const value = event.detail?.value;
+  if (dayNumber === undefined || value === undefined) return;
+  if (field !== 'summary') return;
+  const current = page.data.editDayDrafts[String(dayNumber)] ?? { summary: '' };
+  const limit = 2_000;
+  page.setData({
+    editDayDrafts: {
+      ...page.data.editDayDrafts,
+      [String(dayNumber)]: { ...current, [field]: value.slice(0, limit) },
+    },
+  });
+};
+
+const updateEditItem = (page: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void => {
+  const dayNumber = editDayNumberFromEvent(event);
+  const itemId = event.currentTarget?.dataset?.itemId;
+  const field = event.currentTarget?.dataset?.field as EditItemField | undefined;
+  const value = event.detail?.value;
+  if (dayNumber === undefined || itemId === undefined || value === undefined) return;
+  if (
+    field !== 'description' &&
+    field !== 'recommendationReason' &&
+    field !== 'tips' &&
+    field !== 'estimatedCostCny'
+  ) {
+    return;
+  }
+  const key = `${dayNumber}:${itemId}`;
+  const current = page.data.editItemDrafts[key] ?? {
+    description: '',
+    recommendationReason: '',
+    tips: '',
+    estimatedCostCny: '',
+  };
+  const limit =
+    field === 'tips'
+      ? 10_000
+      : field === 'description'
+        ? 2_000
+        : field === 'recommendationReason'
+          ? 1_000
+          : 32;
+  page.setData({
+    editItemDrafts: {
+      ...page.data.editItemDrafts,
+      [key]: { ...current, [field]: value.slice(0, limit) },
+    },
+  });
+};
+
+const parseEditMoney = (value: string): number | undefined => {
+  if (value.trim().length === 0) return undefined;
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const buildEditInput = (
+  page: PageInstance<TripPlanPageData>,
+  state: TripPlanViewState,
+): EditTripPlanInput | undefined => {
+  if (state.selectedVersion === undefined || state.plan === undefined) return undefined;
+  const dayEdits: EditTripPlanInput['dayEdits'] = [];
+  const itemEdits: EditTripPlanInput['itemEdits'] = [];
+  const summary = page.data.editSummary.trim();
+  const input: EditTripPlanInput = {
+    sourceVersion: state.selectedVersion,
+    ...(summary.length > 0 && summary !== state.plan.summary ? { summary } : {}),
+  };
+
+  for (const day of state.plan.days) {
+    const draft = page.data.editDayDrafts[String(day.dayNumber)];
+    if (draft === undefined) continue;
+    const dayEdit: { dayNumber: number; summary?: string } = { dayNumber: day.dayNumber };
+    const daySummary = draft.summary.trim();
+    if (daySummary.length > 0 && daySummary !== day.summary) dayEdit.summary = daySummary;
+    if (Object.keys(dayEdit).length > 1) dayEdits.push(dayEdit);
+  }
+
+  for (const day of state.plan.days) {
+    for (const item of day.items) {
+      const draft = page.data.editItemDrafts[`${day.dayNumber}:${item.id}`];
+      if (draft === undefined) continue;
+      const itemEdit: {
+        dayNumber: number;
+        itemId: string;
+        description?: string;
+        recommendationReason?: string;
+        tips?: string[];
+        estimatedCostCny?: number;
+      } = { dayNumber: day.dayNumber, itemId: item.id };
+      const description = draft.description.trim();
+      if (description.length > 0 && description !== item.description)
+        itemEdit.description = description;
+      const recommendationReason = draft.recommendationReason.trim();
+      if (recommendationReason.length > 0 && recommendationReason !== item.recommendationReason)
+        itemEdit.recommendationReason = recommendationReason;
+      const tipsText = draft.tips.trim();
+      const currentTips = item.tips.join('\n');
+      if (tipsText !== currentTips)
+        itemEdit.tips = tipsText.length === 0 ? [] : tipsText.split(/\r?\n/);
+      const cost = parseEditMoney(draft.estimatedCostCny);
+      if (cost !== undefined && cost !== item.estimatedCostCny) itemEdit.estimatedCostCny = cost;
+      if (Object.keys(itemEdit).length > 2) itemEdits.push(itemEdit);
+    }
+  }
+
+  const candidate = {
+    ...input,
+    ...(dayEdits.length === 0 ? {} : { dayEdits }),
+    ...(itemEdits.length === 0 ? {} : { itemEdits }),
+  };
+  const parsed = EditTripPlanInputSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : undefined;
+};
+
+const submitEdit = async (page: PageInstance<TripPlanPageData>): Promise<void> => {
+  const state = getViewState(page);
+  if (
+    page.data.isSwitching ||
+    page.data.isEditing ||
+    state.status !== 'ready' ||
+    state.selectedVersion === undefined ||
+    state.plan === undefined ||
+    page.data.tripId.length === 0
+  ) {
+    return;
+  }
+  const input = buildEditInput(page, state);
+  if (input === undefined) {
+    const nextState = applyTripPlanViewError(state, '请至少修改一项攻略内容。');
+    setViewState(page, nextState);
+    syncPage(page, nextState, page.data.plan);
+    return;
+  }
+  const oldPlan = page.data.plan;
+  let nextState = beginTripPlanEdit(state, input);
+  setViewState(page, nextState);
+  syncPage(page, nextState, oldPlan);
+  try {
+    const result = await tripPlanService.editTripPlanVersion(
+      page.data.tripId,
+      input.sourceVersion,
+      input,
+    );
+    if (!viewStates.has(page)) return;
+    nextState = applyTripPlanEditResult(getViewState(page), result);
+    setViewState(page, nextState);
+    page.setData({ editSummary: '', editDayDrafts: {}, editItemDrafts: {} });
+    syncPage(page, nextState, displayPlan(nextState));
+  } catch (error: unknown) {
+    if (!viewStates.has(page)) return;
+    nextState = applyTripPlanViewError(getViewState(page), getTripPlanUserMessage(error));
+    setViewState(page, nextState);
+    // Keep both the old immutable plan and the user's draft inputs available for retry.
+    syncPage(page, nextState, oldPlan);
+  }
+};
+
 const loadDiff = async (
   page: PageInstance<TripPlanPageData>,
   fromVersion: number,
@@ -360,6 +578,10 @@ Page<TripPlanPageData>({
     diffToPickerIndex: 0,
     diffVersionLabels: [],
     isDiffLoading: false,
+    isEditing: false,
+    editSummary: '',
+    editDayDrafts: {},
+    editItemDrafts: {},
   },
 
   onLoad(this: PageInstance<TripPlanPageData>, options: TripPlanRouteOptions): void {
@@ -421,6 +643,25 @@ Page<TripPlanPageData>({
     const dayNumber = dayNumberFromEvent(event);
     if (dayNumber === undefined) return;
     void regenerateDay(this, dayNumber);
+  },
+
+  onEditSummaryInput(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    if (this.data.isEditing) return;
+    updateEditSummary(this, event);
+  },
+
+  onEditDayInput(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    if (this.data.isEditing) return;
+    updateEditDay(this, event);
+  },
+
+  onEditItemInput(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    if (this.data.isEditing) return;
+    updateEditItem(this, event);
+  },
+
+  onSubmitEdit(this: PageInstance<TripPlanPageData>): void {
+    void submitEdit(this);
   },
 
   onDiffFromChange(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {

@@ -67,6 +67,31 @@
       <text class="summary">{{plan.summary}}</text>
     </view>
 
+    <view wx:if="{{status === 'ready' && !isSwitching}}" class="edit-card">
+      <text class="section-title">编辑攻略内容</text>
+      <text class="muted">仅可修改摘要、每日摘要、行程描述/推荐理由/小贴士和金额；地点、路线、名称、提醒与来源不可修改。</text>
+      <textarea
+        class="edit-textarea"
+        value="{{editSummary || plan.summary}}"
+        maxlength="4000"
+        placeholder="攻略摘要"
+        bindinput="onEditSummaryInput"
+        disabled="{{isEditing}}"
+      />
+      <view wx:for="{{plan.days}}" wx:for-item="dayItem" wx:key="dayNumber" class="edit-day-card">
+        <text class="block-label">第 {{dayItem.dayNumber}} 天</text>
+        <textarea class="edit-textarea" data-day-number="{{dayItem.dayNumber}}" data-field="summary" value="{{dayItem.editSummary}}" maxlength="2000" placeholder="每日摘要" bindinput="onEditDayInput" disabled="{{isEditing}}" />
+        <view wx:for="{{dayItem.items}}" wx:for-item="planItem" wx:key="id" class="edit-item-card">
+          <text class="muted">行程：{{planItem.name}}（名称不可编辑）</text>
+          <textarea class="edit-textarea" data-day-number="{{dayItem.dayNumber}}" data-item-id="{{planItem.id}}" data-field="description" value="{{planItem.editDescription}}" maxlength="2000" placeholder="描述" bindinput="onEditItemInput" disabled="{{isEditing}}" />
+          <textarea class="edit-textarea" data-day-number="{{dayItem.dayNumber}}" data-item-id="{{planItem.id}}" data-field="recommendationReason" value="{{planItem.editRecommendationReason}}" maxlength="1000" placeholder="推荐理由" bindinput="onEditItemInput" disabled="{{isEditing}}" />
+          <textarea class="edit-textarea" data-day-number="{{dayItem.dayNumber}}" data-item-id="{{planItem.id}}" data-field="tips" value="{{planItem.editTips}}" maxlength="10000" placeholder="小贴士，每行一条" bindinput="onEditItemInput" disabled="{{isEditing}}" />
+          <input class="edit-input" data-day-number="{{dayItem.dayNumber}}" data-item-id="{{planItem.id}}" data-field="estimatedCostCny" value="{{planItem.editEstimatedCostCny}}" maxlength="32" type="digit" placeholder="行程金额" bindinput="onEditItemInput" disabled="{{isEditing}}" />
+        </view>
+      </view>
+      <button class="edit-button" size="mini" bindtap="onSubmitEdit" loading="{{isEditing}}" disabled="{{isEditing}}">保存为新版本</button>
+    </view>
+
     <view class="section-card">
       <text class="section-title">每日行程</text>
       <view wx:for="{{plan.days}}" wx:key="dayNumber" class="day-card">

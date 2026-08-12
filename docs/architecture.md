@@ -217,6 +217,23 @@ reservation（`operation` 分别为 `generate`、`regenerate-day`、`restore`）
 小程序详情页只用原生 `text/view` 展示两个 ready 版本之间的结构化差异，并为非当前版本提供恢复按钮；恢复采用单飞 loading，成功切换到新版本，失败
 保留当前快照，`AUTH_TOKEN_INVALID` 继续通过 `AuthService` 清理认证状态。
 
+### TripPlan 受控内容编辑（TASK-021）
+
+编辑接口 `PATCH /trips/:id/plan/:version` 只接受严格的 `EditTripPlanInput`，并要求 body 的 `sourceVersion` 与 URL
+版本一致。白名单仅包括计划 `summary`；每日 `summary`、结构化 `warnings`；行程条目的 `description`、
+`recommendationReason`、`tips` 和 `estimatedCostCny`。Schema 使用 strict object，至少包含一项编辑，拒绝未知字段、重复日号/条目 ID、
+越界数组和超长文本；地点、路线、来源、生成时间、Schema 版本和预算分类汇总等服务端事实不能由客户端提交。
+
+服务端先按 `userId + tripId` 做认证隔离，再读取同一用户的 ready 源快照并校验快照 `tripId`。纯函数 `applyTripPlanEdits` 复制快照而不修改源对象，
+对不存在的日/条目统一返回 `TRIP_PLAN_ENTITY_MISMATCH`，重新通过完整 `TripPlanSchema`，从条目金额重算每日和分类/总预算；若没有实际业务变化则在
+reservation 之前验证失败，不创建新版本。
+编辑不会调用 LLM、天气、POI 或路线 Provider，`generatedAt` 由服务端生成。
+
+`TripPlanRepository` 的 `reserveEdit` 与生成、单日重生成、恢复共用同一个 Trip 行级原子 `generating` reservation，且记录稳定
+`operation='edit'`。成功事务同时写入新递增版本、日和条目并切换 Trip 为 `ready`；任何失败只保留 `failed` 版本元数据，恢复编辑前的 `ready` 状态，
+旧 JSON 和历史子表行不可变。小程序只在 ready 版本显示摘要、行程描述/推荐理由/小贴士/金额编辑入口，不提供 warnings 编辑控件，使用单飞 loading，成功切换版本，失败保留旧攻略和输入草稿；认证失效仍集中由
+`AuthService` 处理。当前边界仍不包含聊天、地图、分享、实时价格和多人协作。
+
 ### 小程序 TripPlan 生成流程与只读详情（TASK-018）
 
 首页提交由轻量表单状态转换为严格 `CreateTripInputSchema` 输入，先检查 `AuthService` 登录状态，再保存本地草稿并调用

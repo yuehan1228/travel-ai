@@ -2,6 +2,8 @@ import { Inject, Injectable } from '@nestjs/common';
 
 import {
   CreateTripInputSchema,
+  EditTripPlanInputSchema,
+  EditTripPlanResultSchema,
   GenerateTripPlanInputSchema,
   PlaceListResultSchema,
   RegenerateTripPlanDayInputSchema,
@@ -19,6 +21,8 @@ import {
 } from '@travel-guide/shared-schemas';
 import type {
   CreateTripInput,
+  EditTripPlanInput,
+  EditTripPlanResult,
   EstimateRouteInput,
   EstimateRouteOrderInput,
   GetWeatherInput,
@@ -52,6 +56,7 @@ import type { TripPlanGenerationContext } from './trip-plan-generation.types';
 import { TripPlanDayRegenerationContextSchema } from './trip-plan-day-regeneration.schema';
 import type { TripPlanDayRegenerationContext } from './trip-plan-day-regeneration.types';
 import { TripPlanGenerationService } from './trip-plan-generation.service';
+import { applyTripPlanEdits, TripPlanEditError } from './trip-plan-edit';
 import {
   compareTripPlanVersions,
   TripPlanDiffValidationError,
@@ -65,6 +70,7 @@ import {
   type TripPlanRepository,
   type TripPlanVersionRecord,
   type TripPlanRestoreReservationResult,
+  type TripPlanEditReservationResult,
 } from './repositories/trip-plan.repository';
 
 export interface TripPlanGenerator {
@@ -101,6 +107,13 @@ const planNotFoundError = (): TripPlanException =>
 const dayNotFoundError = (): TripPlanException =>
   new TripPlanException('TRIP_PLAN_DAY_NOT_FOUND', 404, 'The requested TripPlan day was not found');
 
+const entityMismatchError = (): TripPlanException =>
+  new TripPlanException(
+    'TRIP_PLAN_ENTITY_MISMATCH',
+    422,
+    'The requested TripPlan entity does not belong to the source snapshot',
+  );
+
 const inProgressError = (): TripPlanException =>
   new TripPlanException(
     'TRIP_PLAN_GENERATION_IN_PROGRESS',
@@ -129,6 +142,15 @@ const asCode = (error: unknown): string | undefined =>
   typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
     ? error.code
     : undefined;
+
+const mapEditError = (error: unknown): TripPlanException => {
+  if (error instanceof TripPlanException) return error;
+  if (error instanceof TripPlanEditError) {
+    if (error.code === 'TRIP_PLAN_ENTITY_MISMATCH') return entityMismatchError();
+    return validationError();
+  }
+  return persistenceError();
+};
 
 const preferenceCategories = (input: CreateTripInput): PlaceCategory[] => {
   const categories = new Set<PlaceCategory>(['attraction', 'museum', 'park', 'restaurant', 'cafe']);
@@ -162,6 +184,20 @@ const dayRegenerationResult = (
   sourceVersion,
   dayNumber,
 });
+
+const editResult = (record: TripPlanVersionRecord, sourceVersion: number): EditTripPlanResult => {
+  if (record.status !== 'ready' || record.plan === undefined) {
+    throw persistenceError();
+  }
+  return {
+    tripId: record.tripId,
+    sourceVersion,
+    version: record.version,
+    status: 'ready',
+    plan: record.plan,
+    summary: tripPlanVersionSummary(record),
+  };
+};
 
 const budgetCategoryForItem: Record<
   TripPlan['days'][number]['items'][number]['type'],
@@ -509,6 +545,131 @@ export class TripPlanService {
     }
   }
 
+  /** Apply a controlled edit to a ready snapshot without invoking any Provider. */
+  public edit(
+    userId: string,
+    tripId: string,
+    version: number,
+    input: EditTripPlanInput,
+  ): Promise<EditTripPlanResult>;
+  public edit(
+    userId: string,
+    tripId: string,
+    input: EditTripPlanInput,
+  ): Promise<EditTripPlanResult>;
+  public async edit(
+    userId: string,
+    tripId: string,
+    versionOrInput: number | EditTripPlanInput,
+    input?: EditTripPlanInput,
+  ): Promise<EditTripPlanResult> {
+    this.assertTripId(tripId);
+    const urlVersion =
+      typeof versionOrInput === 'number' ? versionOrInput : versionOrInput.sourceVersion;
+    const parsedInput = EditTripPlanInputSchema.safeParse(
+      typeof versionOrInput === 'number' ? input : versionOrInput,
+    );
+    if (!parsedInput.success || parsedInput.data.sourceVersion !== urlVersion) {
+      throw validationError();
+    }
+    if (!Number.isSafeInteger(urlVersion) || urlVersion < 1 || urlVersion > 2_147_483_647) {
+      throw validationError();
+    }
+    const now = this.clock.now();
+    if (Number.isNaN(now.getTime())) throw validationError();
+
+    const trip = await this.requireTripForVersionOperation(userId, tripId);
+    if (trip.status === 'generating') throw inProgressError();
+
+    let sourceRecord: TripPlanVersionRecord | undefined;
+    try {
+      sourceRecord = await this.repository.findVersionForUser(userId, tripId, urlVersion);
+    } catch {
+      throw persistenceError();
+    }
+    if (
+      sourceRecord === undefined ||
+      sourceRecord.status !== 'ready' ||
+      sourceRecord.plan === undefined
+    ) {
+      throw planNotFoundError();
+    }
+    const sourcePlan = TripPlanSchema.safeParse(sourceRecord.plan);
+    if (!sourcePlan.success) throw planNotFoundError();
+    if (sourcePlan.data.tripId !== tripId) {
+      throw new TripPlanException(
+        'TRIP_PLAN_ENTITY_MISMATCH',
+        422,
+        'The TripPlan snapshot does not belong to the requested trip',
+      );
+    }
+
+    const generatedAt = now.toISOString();
+    let editedPlan: TripPlan;
+    try {
+      // Validate and materialise before reserving a version. No-op and entity errors
+      // must not leave a failed generating record behind.
+      editedPlan = applyTripPlanEdits(sourcePlan.data, parsedInput.data, generatedAt);
+    } catch (error: unknown) {
+      throw mapEditError(error);
+    }
+
+    let reserved: TripPlanEditReservationResult;
+    try {
+      if (this.repository.reserveEdit !== undefined) {
+        reserved = await this.repository.reserveEdit(userId, tripId, urlVersion, now);
+      } else {
+        const fallback = await this.repository.reserveGeneration(userId, tripId, now);
+        reserved =
+          fallback.status === 'reserved'
+            ? {
+                status: 'reserved',
+                reservation: {
+                  ...fallback.reservation,
+                  operation: 'edit' as const,
+                  sourceVersion: urlVersion,
+                },
+              }
+            : fallback;
+      }
+    } catch {
+      throw persistenceError();
+    }
+    if (reserved.status === 'not_found') throw tripNotFoundError();
+    if (reserved.status === 'in_progress') throw inProgressError();
+    if (reserved.status === 'source_not_ready') throw planNotFoundError();
+    const reservation = reserved.reservation;
+
+    try {
+      let saved: TripPlanVersionRecord;
+      try {
+        saved = await this.repository.saveReady(
+          userId,
+          tripId,
+          reservation,
+          editedPlan,
+          new Date(editedPlan.generatedAt),
+        );
+      } catch {
+        throw persistenceError();
+      }
+      const result = editResult(saved, urlVersion);
+      const validated = EditTripPlanResultSchema.safeParse(result);
+      if (!validated.success) throw persistenceError();
+      return validated.data;
+    } catch (error: unknown) {
+      const mapped = mapEditError(error);
+      try {
+        const failedAt = this.clock.now();
+        if (Number.isNaN(failedAt.getTime())) throw persistenceError();
+        await this.repository.markFailed(userId, tripId, reservation, failedAt);
+      } catch {
+        throw persistenceError();
+      }
+      throw mapped;
+    }
+  }
+
   /** Compare two ready immutable snapshots without invoking any provider. */
   public async diff(
     userId: string,
@@ -775,6 +936,24 @@ export class TripPlanService {
     input: RegenerateTripPlanDayInput,
   ): Promise<RegenerateTripPlanDayResult> {
     return this.regenerateDay(userId, tripId, input);
+  }
+
+  public editTripPlanVersion(
+    userId: string,
+    tripId: string,
+    version: number,
+    input: EditTripPlanInput,
+  ): Promise<EditTripPlanResult> {
+    return this.edit(userId, tripId, version, input);
+  }
+
+  public editTripPlan(
+    userId: string,
+    tripId: string,
+    version: number,
+    input: EditTripPlanInput,
+  ): Promise<EditTripPlanResult> {
+    return this.editTripPlanVersion(userId, tripId, version, input);
   }
 
   public getLatestTripPlan(userId: string, tripId: string): Promise<TripPlanVersionListResult> {

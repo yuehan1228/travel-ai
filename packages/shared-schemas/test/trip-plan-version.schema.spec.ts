@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   GenerateTripPlanInputSchema,
+  EditTripPlanInputSchema,
+  EditTripPlanResultSchema,
   RegenerateTripPlanDayInputSchema,
   RegenerateTripPlanDayResultSchema,
   TripPlanGenerationResultSchema,
@@ -24,6 +26,146 @@ const summary = {
 };
 
 describe('TripPlan version contracts', () => {
+  it('accepts only the controlled edit whitelist and rejects duplicates/unknown fields', () => {
+    const itemId = '323e4567-e89b-12d3-a456-426614174000';
+    const valid = {
+      sourceVersion: 1,
+      summary: '  更新摘要  ',
+      dayEdits: [
+        {
+          dayNumber: 1,
+          warnings: [{ code: 'RAIN', severity: 'warning', message: '  提醒  ' }],
+        },
+      ],
+      itemEdits: [
+        {
+          dayNumber: 1,
+          itemId,
+          recommendationReason: '  更适合当前节奏  ',
+          tips: ['小贴士'],
+        },
+      ],
+    };
+    expect(EditTripPlanInputSchema.parse(valid)).toEqual({
+      sourceVersion: 1,
+      summary: '更新摘要',
+      dayEdits: [
+        {
+          dayNumber: 1,
+          warnings: [{ code: 'RAIN', severity: 'warning', message: '提醒' }],
+        },
+      ],
+      itemEdits: [
+        {
+          dayNumber: 1,
+          itemId,
+          recommendationReason: '更适合当前节奏',
+          tips: ['小贴士'],
+        },
+      ],
+    });
+    expect(EditTripPlanInputSchema.safeParse({ sourceVersion: 1 }).success).toBe(false);
+    expect(
+      EditTripPlanInputSchema.safeParse({
+        ...valid,
+        dayEdits: [
+          { dayNumber: 1, summary: 'a' },
+          { dayNumber: 1, summary: 'b' },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      EditTripPlanInputSchema.safeParse({
+        ...valid,
+        itemEdits: [
+          { dayNumber: 1, itemId, description: 'a' },
+          { dayNumber: 1, itemId, description: 'b' },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      EditTripPlanInputSchema.safeParse({
+        sourceVersion: 1,
+        itemEdits: [
+          { dayNumber: 1, itemId, description: '第一天' },
+          { dayNumber: 2, itemId, description: '第二天' },
+        ],
+      }).success,
+    ).toBe(true);
+    expect(EditTripPlanInputSchema.safeParse({ ...valid, place: {} }).success).toBe(false);
+    expect(
+      EditTripPlanInputSchema.safeParse({
+        sourceVersion: 1,
+        dayEdits: [{ dayNumber: 1, estimatedCostCny: 1 }],
+      }).success,
+    ).toBe(false);
+    expect(
+      EditTripPlanInputSchema.safeParse({
+        sourceVersion: 1,
+        itemEdits: [{ dayNumber: 1, itemId, name: '禁止' }],
+      }).success,
+    ).toBe(false);
+    expect(
+      EditTripPlanInputSchema.safeParse({
+        sourceVersion: 1,
+        dayEdits: [{ dayNumber: 1, warnings: ['不是结构化 warning'] }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('requires a newer ready result whose snapshot matches the summary', () => {
+    const plan = {
+      schemaVersion: '1.0' as const,
+      tripId,
+      cityName: '杭州',
+      startDate: '2026-08-12',
+      endDate: '2026-08-12',
+      travelerCount: 2,
+      summary: '摘要',
+      days: [
+        {
+          dayNumber: 1,
+          date: '2026-08-12',
+          summary: '第一天',
+          weather: {
+            date: '2026-08-12',
+            condition: 'clear' as const,
+            conditionText: '晴',
+            source: 'forecast' as const,
+            isReference: false,
+          },
+          items: [],
+          estimatedCostCny: 0,
+          warnings: [],
+        },
+      ],
+      hotelRecommendations: [],
+      foodRecommendations: [],
+      budget: {
+        currency: 'CNY' as const,
+        totalCny: 0,
+        accommodationCny: 0,
+        transportationCny: 0,
+        foodCny: 0,
+        attractionsCny: 0,
+        otherCny: 0,
+      },
+      transportationTips: [],
+      generalTips: [],
+      generatedAt: timestamp,
+    };
+    const result = {
+      tripId,
+      sourceVersion: 1,
+      version: 2,
+      status: 'ready' as const,
+      plan,
+      summary: { ...summary, version: 2, status: 'ready' as const },
+    };
+    expect(EditTripPlanResultSchema.safeParse(result).success).toBe(true);
+    expect(EditTripPlanResultSchema.safeParse({ ...result, version: 1 }).success).toBe(false);
+  });
+
   it('accepts only an empty generation input', () => {
     expect(GenerateTripPlanInputSchema.parse({})).toEqual({});
     expect(GenerateTripPlanInputSchema.safeParse({ model: 'gpt' }).success).toBe(false);

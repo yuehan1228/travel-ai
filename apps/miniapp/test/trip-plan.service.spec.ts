@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type {
+  EditTripPlanResult,
   GenerateTripPlanInput,
   RegenerateTripPlanDayResult,
   RestoreTripPlanVersionResult,
@@ -120,6 +121,41 @@ const createClient = (adapter: RequestAdapter) =>
   );
 
 describe('miniapp TripPlanService', () => {
+  it('sends a strict controlled edit with matching URL/body version', async () => {
+    const requests: Array<{ method: string; path: string; data: unknown }> = [];
+    const editResult: EditTripPlanResult = {
+      tripId,
+      sourceVersion: 1,
+      version: 2,
+      status: 'ready',
+      plan,
+      summary: { ...summary, id: '323e4567-e89b-12d3-a456-426614174000', version: 2 },
+    };
+    const service = new TripPlanService(
+      createClient(async (options) => {
+        requests.push({ method: options.method, path: options.url, data: options.data });
+        return { statusCode: 200, data: { success: true, data: editResult, requestId: 'edit-1' } };
+      }),
+      createAuth('plan-token'),
+    );
+    await expect(
+      service.editTripPlanVersion(tripId, 1, {
+        sourceVersion: 1,
+        summary: '更新摘要',
+      }),
+    ).resolves.toEqual(editResult);
+    expect(requests).toEqual([
+      {
+        method: 'PATCH',
+        path: `https://api.example.invalid/trips/${tripId}/plan/1`,
+        data: { sourceVersion: 1, summary: '更新摘要' },
+      },
+    ]);
+    await expect(
+      service.editTripPlanVersion(tripId, 2, { sourceVersion: 1, summary: '不匹配' }),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
   it('uses strict shared schemas, Bearer auth and the three plan endpoints', async () => {
     const requests: Array<{ method: string; path: string; authorization: string; data: unknown }> =
       [];

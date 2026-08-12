@@ -1,5 +1,6 @@
 import {
   TripIdSchema,
+  EditTripPlanResultSchema,
   TripPlanGenerationResultSchema,
   RegenerateTripPlanDayResultSchema,
   RestoreTripPlanVersionResultSchema,
@@ -9,6 +10,8 @@ import {
 } from '@travel-guide/shared-schemas';
 import type {
   DailyWeather,
+  EditTripPlanInput,
+  EditTripPlanResult,
   FoodRecommendation,
   HotelAreaRecommendation,
   Place,
@@ -113,6 +116,8 @@ export interface TripPlanViewState {
   readonly diffToVersion?: number;
   readonly isDiffLoading: boolean;
   readonly restoringVersion?: number;
+  readonly isEditing: boolean;
+  readonly editInput?: EditTripPlanInput;
 }
 
 export interface TripPlanViewStateRegistry<TPage extends object> {
@@ -146,6 +151,8 @@ export const createTripPlanViewState = (tripId: string): TripPlanViewState => ({
   errorMessage: '',
   isDiffLoading: false,
   restoringVersion: undefined,
+  isEditing: false,
+  editInput: undefined,
 });
 
 export const getVisibleTripPlanVersions = (
@@ -203,6 +210,12 @@ export const parseTripPlanRestoreResult = (value: unknown): RestoreTripPlanVersi
   return parsed.data;
 };
 
+export const parseTripPlanEditResult = (value: unknown): EditTripPlanResult => {
+  const parsed = EditTripPlanResultSchema.safeParse(value);
+  if (!parsed.success || parsed.data.status !== 'ready') throw invalidTripPlanResponse();
+  return parsed.data;
+};
+
 export const beginTripPlanLoad = (state: TripPlanViewState): TripPlanViewState => ({
   ...state,
   status: 'loading',
@@ -213,12 +226,15 @@ export const beginTripPlanLoad = (state: TripPlanViewState): TripPlanViewState =
   restoringVersion: undefined,
 });
 
-export const beginTripPlanVersionSwitch = (state: TripPlanViewState): TripPlanViewState => ({
-  ...state,
-  isSwitching: true,
-  regeneratingDay: undefined,
-  errorMessage: '',
-});
+export const beginTripPlanVersionSwitch = (state: TripPlanViewState): TripPlanViewState =>
+  state.isEditing
+    ? state
+    : {
+        ...state,
+        isSwitching: true,
+        regeneratingDay: undefined,
+        errorMessage: '',
+      };
 
 export const beginTripPlanDiff = (
   state: TripPlanViewState,
@@ -227,6 +243,7 @@ export const beginTripPlanDiff = (
 ): TripPlanViewState => {
   if (
     state.isDiffLoading ||
+    state.isEditing ||
     state.isSwitching ||
     state.restoringVersion !== undefined ||
     !Number.isSafeInteger(fromVersion) ||
@@ -268,6 +285,7 @@ export const beginTripPlanVersionRestore = (
 ): TripPlanViewState => {
   if (
     state.restoringVersion !== undefined ||
+    state.isEditing ||
     !Number.isSafeInteger(version) ||
     version < 1 ||
     version === state.selectedVersion
@@ -305,11 +323,60 @@ export const applyTripPlanVersionRestoreResult = (
   };
 };
 
+export const beginTripPlanEdit = (
+  state: TripPlanViewState,
+  input: EditTripPlanInput,
+): TripPlanViewState => {
+  if (
+    state.isEditing ||
+    state.isSwitching ||
+    state.restoringVersion !== undefined ||
+    state.regeneratingDay !== undefined ||
+    state.status !== 'ready' ||
+    state.selectedVersion !== input.sourceVersion
+  ) {
+    return state;
+  }
+  return { ...state, isEditing: true, editInput: input, errorMessage: '' };
+};
+
+export const applyTripPlanEditResult = (
+  state: TripPlanViewState,
+  result: EditTripPlanResult,
+): TripPlanViewState => {
+  const parsed = parseTripPlanEditResult(result);
+  if (parsed.tripId !== state.tripId) throw invalidTripPlanResponse();
+  const allVersions = getVisibleTripPlanVersions([
+    parsed.summary,
+    ...state.allVersions.filter((item) => item.version !== parsed.version),
+  ]);
+  return {
+    ...state,
+    status: 'ready',
+    plan: parsed.plan,
+    allVersions,
+    readyVersions: getReadyTripPlanVersions(allVersions),
+    latestVersion: parsed.version,
+    selectedVersion: parsed.version,
+    isSwitching: false,
+    regeneratingDay: undefined,
+    isEditing: false,
+    editInput: undefined,
+    diff: undefined,
+    diffFromVersion: undefined,
+    diffToVersion: undefined,
+    isDiffLoading: false,
+    restoringVersion: undefined,
+    errorMessage: '',
+  };
+};
+
 export const beginTripPlanDayRegeneration = (
   state: TripPlanViewState,
   dayNumber: number,
 ): TripPlanViewState =>
   state.regeneratingDay === undefined &&
+  !state.isEditing &&
   Number.isSafeInteger(dayNumber) &&
   dayNumber >= 1 &&
   dayNumber <= 14

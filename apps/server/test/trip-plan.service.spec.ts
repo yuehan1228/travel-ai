@@ -285,6 +285,23 @@ describe('TripPlanService', () => {
     });
   });
 
+  it('rejects a no-op edit before reserving a new version', async () => {
+    const { service, planRepository } = createService();
+    await service.generate(userId, tripId, {});
+    const reserveSpy = vi.spyOn(planRepository, 'reserveGeneration');
+    const recordCount = planRepository.records.length;
+
+    await expect(
+      service.edit(userId, tripId, 1, {
+        sourceVersion: 1,
+        summary: '轻松安排。',
+      }),
+    ).rejects.toMatchObject({ code: 'TRIP_PLAN_VALIDATION_ERROR' });
+    expect(reserveSpy).not.toHaveBeenCalled();
+    expect(planRepository.records).toHaveLength(recordCount);
+    expect(planRepository.records[0]?.status).toBe('ready');
+  });
+
   it('rejects a concurrent reservation and marks provider failures as failed', async () => {
     const { service, planRepository, generationService } = createService();
     let release!: () => void;

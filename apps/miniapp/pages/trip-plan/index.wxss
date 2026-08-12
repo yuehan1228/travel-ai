@@ -75,6 +75,51 @@
   line-height: 1.6;
 }
 
+.edit-card {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 20rpx;
+  padding: 30rpx 26rpx;
+  background: #ffffff;
+  border-radius: 20rpx;
+  box-shadow: 0 8rpx 28rpx rgba(31, 41, 55, 0.06);
+}
+
+.edit-day-card,
+.edit-item-card {
+  margin-top: 18rpx;
+  padding: 16rpx;
+  background: #f9fafb;
+  border-radius: 12rpx;
+}
+
+.edit-item-card {
+  background: #ffffff;
+  border: 1rpx solid #e5e7eb;
+}
+
+.edit-input,
+.edit-textarea {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 12rpx;
+  padding: 14rpx;
+  color: #374151;
+  background: #ffffff;
+  border: 1rpx solid #e5e7eb;
+  border-radius: 8rpx;
+  font-size: 25rpx;
+}
+
+.edit-textarea {
+  min-height: 100rpx;
+}
+
+.edit-button {
+  margin-top: 18rpx;
+  margin-left: 0;
+}
+
 .section-title {
   display: block;
   color: #111827;

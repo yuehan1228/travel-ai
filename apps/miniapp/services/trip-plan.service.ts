@@ -1,4 +1,6 @@
 import {
+  EditTripPlanInputSchema,
+  EditTripPlanResultSchema,
   GenerateTripPlanInputSchema,
   RegenerateTripPlanDayInputSchema,
   RegenerateTripPlanDayResultSchema,
@@ -11,6 +13,8 @@ import {
   TripPlanVersionListResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
+  EditTripPlanInput,
+  EditTripPlanResult,
   GenerateTripPlanInput,
   RegenerateTripPlanDayInput,
   RegenerateTripPlanDayResult,
@@ -134,6 +138,28 @@ export class TripPlanService {
       path: `/trips/${encodeURIComponent(tripId)}/regenerate-day`,
       data: parsedInput,
       schema: RegenerateTripPlanDayResultSchema,
+    });
+  }
+
+  public async editTripPlanVersion(
+    id: string,
+    version: number,
+    input: EditTripPlanInput,
+  ): Promise<EditTripPlanResult> {
+    const tripId = TripIdSchema.parse(id);
+    const parsedVersion = parseVersion(version);
+    const parsedInput = EditTripPlanInputSchema.parse(input);
+    if (parsedInput.sourceVersion !== parsedVersion) {
+      throw new RequestError({
+        code: 'INVALID_RESPONSE',
+        message: 'Edit source version does not match the URL version',
+      });
+    }
+    return this.request<EditTripPlanResult>({
+      method: 'PATCH',
+      path: `/trips/${encodeURIComponent(tripId)}/plan/${parsedVersion}`,
+      data: parsedInput,
+      schema: EditTripPlanResultSchema,
     });
   }
 

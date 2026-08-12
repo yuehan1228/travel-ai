@@ -4,5 +4,7 @@ export type {
   TripPlanRepository,
   TripPlanGenerationReservation,
   TripPlanGenerationReservationResult,
+  TripPlanEditReservationResult,
   TripPlanVersionRecord,
 } from '../trip-plan';
+export { applyTripPlanEdits, TripPlanEditError } from '../trip-plan';

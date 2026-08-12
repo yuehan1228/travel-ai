@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Inject,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -15,6 +16,8 @@ import type { FastifyRequest } from 'fastify';
 
 import {
   GenerateTripPlanInputSchema,
+  EditTripPlanInputSchema,
+  EditTripPlanResultSchema,
   RegenerateTripPlanDayInputSchema,
   RegenerateTripPlanDayResultSchema,
   RestoreTripPlanVersionInputSchema,
@@ -28,6 +31,7 @@ import {
 import type {
   ApiSuccess,
   GenerateTripPlanInput,
+  EditTripPlanResult,
   RegenerateTripPlanDayInput,
   RegenerateTripPlanDayResult,
   RestoreTripPlanVersionInput,
@@ -125,6 +129,35 @@ export class TripPlanController {
     if (!parsedBody.success) throw validationError();
     const result = await this.service.regenerateDay(userId, parseTripId(tripId), parsedBody.data);
     const validated = RegenerateTripPlanDayResultSchema.safeParse(result);
+    if (!validated.success)
+      throw new TripPlanException(
+        'TRIP_PLAN_PERSISTENCE_ERROR',
+        500,
+        'TripPlan data could not be persisted',
+      );
+    return { success: true, data: validated.data, requestId: requestIdFor(request) };
+  }
+
+  @Patch(':id/plan/:version')
+  @HttpCode(HttpStatus.OK)
+  public async edit(
+    @Param('id') tripId: string,
+    @Param('version') version: string,
+    @Body() body: unknown,
+    @CurrentUserId() userId: string,
+    @Req() request: FastifyRequest,
+  ): Promise<ApiSuccess<EditTripPlanResult>> {
+    const parsedBody = EditTripPlanInputSchema.safeParse(body);
+    if (!parsedBody.success) throw validationError();
+    const parsedVersion = parseVersion(version);
+    if (parsedBody.data.sourceVersion !== parsedVersion) throw validationError();
+    const result = await this.service.editTripPlanVersion(
+      userId,
+      parseTripId(tripId),
+      parsedVersion,
+      parsedBody.data,
+    );
+    const validated = EditTripPlanResultSchema.safeParse(result);
     if (!validated.success)
       throw new TripPlanException(
         'TRIP_PLAN_PERSISTENCE_ERROR',

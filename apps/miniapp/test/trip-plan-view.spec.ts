@@ -8,9 +8,11 @@ import {
   applyTripPlanDiffResult,
   applyTripPlanVersionRestoreResult,
   applyTripPlanDayRegenerationResult,
+  applyTripPlanEditResult,
   applyTripPlanViewError,
   applyTripPlanVersionResult,
   beginTripPlanDayRegeneration,
+  beginTripPlanEdit,
   beginTripPlanDiff,
   beginTripPlanVersionRestore,
   createTripPlanDisplayModel,
@@ -204,6 +206,36 @@ describe('TripPlan view adapters', () => {
     expect(switched.selectedVersion).toBe(2);
     expect(switched.regeneratingDay).toBeUndefined();
     expect(switched.readyVersions[0]?.version).toBe(2);
+  });
+
+  it('single-flights ready-only edits, switches on success, and keeps drafts on failure', () => {
+    const state = applyLatestTripPlanResult(createTripPlanViewState(tripId), {
+      items: [readySummary],
+      latestVersion: 1,
+      plan,
+    });
+    const input = { sourceVersion: 1, summary: '更新摘要' } as const;
+    const editing = beginTripPlanEdit(state, input);
+    expect(editing.isEditing).toBe(true);
+    expect(beginTripPlanEdit(editing, input)).toBe(editing);
+    const nextSummary = {
+      ...readySummary,
+      id: '323e4567-e89b-12d3-a456-426614174000',
+      version: 2,
+    };
+    const switched = applyTripPlanEditResult(editing, {
+      tripId,
+      sourceVersion: 1,
+      version: 2,
+      status: 'ready',
+      plan: { ...plan, summary: '更新摘要' },
+      summary: nextSummary,
+    });
+    expect(switched.plan?.summary).toBe('更新摘要');
+    expect(switched.selectedVersion).toBe(2);
+    expect(switched.isEditing).toBe(false);
+    expect(applyTripPlanViewError(editing, '保存失败').plan).toEqual(plan);
+    expect(applyTripPlanViewError(editing, '保存失败').isEditing).toBe(true);
   });
 
   it('single-flights diff and restore while preserving the displayed plan on failure', () => {
