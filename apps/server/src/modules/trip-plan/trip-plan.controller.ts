@@ -13,6 +13,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { FastifyRequest } from 'fastify';
+import { z } from 'zod';
 
 import {
   GenerateTripPlanInputSchema,
@@ -27,6 +28,10 @@ import {
   TripPlanVersionDiffInputSchema,
   TripPlanVersionDiffResultSchema,
   TripPlanVersionListResultSchema,
+  ListTripPlanItemReplacementCandidatesInputSchema,
+  TripPlanItemReplacementCandidateListSchema,
+  ReplaceTripPlanItemInputSchema,
+  ReplaceTripPlanItemResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
   ApiSuccess,
@@ -40,6 +45,9 @@ import type {
   TripPlanVersionDiffResult,
   TripPlanGenerationResult,
   TripPlanVersionListResult,
+  ListTripPlanItemReplacementCandidatesInput,
+  TripPlanItemReplacementCandidateList,
+  ReplaceTripPlanItemResult,
 } from '@travel-guide/shared-types';
 
 import { getRequestId } from '../../http/request-context';
@@ -68,6 +76,12 @@ const parseVersion = (value: string): number => {
   return parsed;
 };
 
+const parseItemId = (value: string): string => {
+  const parsed = z.string().uuid().safeParse(value);
+  if (!parsed.success) throw validationError();
+  return parsed.data;
+};
+
 const parseDiffQuery = (query: unknown): TripPlanVersionDiffInput => {
   if (typeof query !== 'object' || query === null || Array.isArray(query)) {
     throw validationError();
@@ -86,6 +100,43 @@ const parseDiffQuery = (query: unknown): TripPlanVersionDiffInput => {
   const parsed = TripPlanVersionDiffInputSchema.safeParse({
     fromVersion: parseQueryVersion(value.fromVersion),
     toVersion: parseQueryVersion(value.toVersion),
+  });
+  if (!parsed.success) throw validationError();
+  return parsed.data;
+};
+
+const parseReplacementCandidateQuery = (
+  query: unknown,
+  sourceVersion: number,
+  itemId: string,
+): ListTripPlanItemReplacementCandidatesInput => {
+  if (typeof query !== 'object' || query === null || Array.isArray(query)) {
+    throw validationError();
+  }
+  const value = query as Record<string, unknown>;
+  const keys = Object.keys(value).sort();
+  if (keys.some((key) => !['dayNumber', 'page', 'pageSize'].includes(key))) {
+    throw validationError();
+  }
+  if (!Object.prototype.hasOwnProperty.call(value, 'dayNumber')) {
+    throw validationError();
+  }
+  const parseQueryNumber = (raw: unknown): number | undefined => {
+    if (typeof raw === 'number') return raw;
+    if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return undefined;
+    const parsed = Number(raw);
+    return Number.isSafeInteger(parsed) ? parsed : undefined;
+  };
+  const parsed = ListTripPlanItemReplacementCandidatesInputSchema.safeParse({
+    sourceVersion,
+    itemId,
+    dayNumber: parseQueryNumber(value.dayNumber),
+    ...(Object.prototype.hasOwnProperty.call(value, 'page')
+      ? { page: parseQueryNumber(value.page) }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(value, 'pageSize')
+      ? { pageSize: parseQueryNumber(value.pageSize) }
+      : {}),
   });
   if (!parsed.success) throw validationError();
   return parsed.data;
@@ -129,6 +180,65 @@ export class TripPlanController {
     if (!parsedBody.success) throw validationError();
     const result = await this.service.regenerateDay(userId, parseTripId(tripId), parsedBody.data);
     const validated = RegenerateTripPlanDayResultSchema.safeParse(result);
+    if (!validated.success)
+      throw new TripPlanException(
+        'TRIP_PLAN_PERSISTENCE_ERROR',
+        500,
+        'TripPlan data could not be persisted',
+      );
+    return { success: true, data: validated.data, requestId: requestIdFor(request) };
+  }
+
+  @Get(':id/plan/:version/items/:itemId/replacement-candidates')
+  @HttpCode(HttpStatus.OK)
+  public async listReplacementCandidates(
+    @Param('id') tripId: string,
+    @Param('version') version: string,
+    @Param('itemId') itemId: string,
+    @Query() query: unknown,
+    @CurrentUserId() userId: string,
+    @Req() request: FastifyRequest,
+  ): Promise<ApiSuccess<TripPlanItemReplacementCandidateList>> {
+    const parsedVersion = parseVersion(version);
+    const parsedItemId = parseItemId(itemId);
+    const parsedInput = parseReplacementCandidateQuery(query, parsedVersion, parsedItemId);
+    const result = await this.service.listReplacementCandidates(
+      userId,
+      parseTripId(tripId),
+      parsedVersion,
+      parsedInput,
+    );
+    const validated = TripPlanItemReplacementCandidateListSchema.safeParse(result);
+    if (!validated.success)
+      throw new TripPlanException(
+        'TRIP_PLAN_PERSISTENCE_ERROR',
+        500,
+        'TripPlan data could not be persisted',
+      );
+    return { success: true, data: validated.data, requestId: requestIdFor(request) };
+  }
+
+  @Post(':id/plan/:version/replace-item')
+  @HttpCode(HttpStatus.OK)
+  public async replaceItem(
+    @Param('id') tripId: string,
+    @Param('version') version: string,
+    @Body() body: unknown,
+    @CurrentUserId() userId: string,
+    @Req() request: FastifyRequest,
+  ): Promise<ApiSuccess<ReplaceTripPlanItemResult>> {
+    const parsedVersion = parseVersion(version);
+    const parsedBody = ReplaceTripPlanItemInputSchema.safeParse(body);
+    if (!parsedBody.success || parsedBody.data.sourceVersion !== parsedVersion) {
+      throw validationError();
+    }
+    const result = await this.service.replaceTripPlanItem(
+      userId,
+      parseTripId(tripId),
+      parsedVersion,
+      parsedBody.data,
+    );
+    const validated = ReplaceTripPlanItemResultSchema.safeParse(result);
     if (!validated.success)
       throw new TripPlanException(
         'TRIP_PLAN_PERSISTENCE_ERROR',

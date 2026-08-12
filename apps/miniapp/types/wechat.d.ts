@@ -33,6 +33,15 @@ interface WechatNavigateToOptions {
   fail?: (failure: WechatRequestFailure) => void;
 }
 
+interface WechatShowModalOptions {
+  title?: string;
+  content?: string;
+  confirmText?: string;
+  cancelText?: string;
+  success?: (response: { confirm: boolean; cancel: boolean }) => void;
+  fail?: (failure: WechatRequestFailure) => void;
+}
+
 type WxRequestFunction = (options: WechatRequestOptions) => WechatRequestTask;
 
 interface WechatLoginSuccess {
@@ -50,6 +59,7 @@ declare namespace wx {
   function request(options: WechatRequestOptions): WechatRequestTask;
   function login(options: WechatLoginOptions): void;
   function navigateTo(options: WechatNavigateToOptions): void;
+  function showModal(options: WechatShowModalOptions): void;
   function getStorageSync(key: string): string | undefined;
   function setStorageSync(key: string, value: string): void;
   function removeStorageSync(key: string): void;

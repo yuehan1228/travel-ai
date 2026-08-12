@@ -9,6 +9,8 @@ import type {
   TripPlanVersionDiffResult,
   TripPlanVersionListResult,
   TripPlanVersionSummary,
+  TripPlanItemReplacementCandidateList,
+  ReplaceTripPlanItemResult,
 } from '@travel-guide/shared-types';
 
 import { createHttpClient, type RequestAdapter } from '../services/http-client';
@@ -102,6 +104,37 @@ const restoreResult: RestoreTripPlanVersionResult = {
   plan,
   summary: restoredSummary,
 };
+const candidatePlace = {
+  id: '423e4567-e89b-12d3-a456-426614174000',
+  provider: 'fake-map',
+  providerPlaceId: 'replacement-1',
+  name: '替换景点',
+  category: 'attraction' as const,
+  categoryText: '景点',
+  address: '杭州市西湖区',
+  location: { longitude: 120.15, latitude: 30.25 },
+  verifiedAt: generatedAt,
+  dataSource: 'cache' as const,
+};
+const candidateList: TripPlanItemReplacementCandidateList = {
+  items: [
+    {
+      place: candidatePlace,
+      recommendationReason: '已通过地点数据校验',
+    },
+  ],
+  pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+};
+const itemReplacementResult: ReplaceTripPlanItemResult = {
+  tripId,
+  sourceVersion: 1,
+  dayNumber: 1,
+  itemId: '523e4567-e89b-12d3-a456-426614174000',
+  version: 2,
+  status: 'ready',
+  plan,
+  summary: { ...summary, id: '523e4567-e89b-12d3-a456-426614174000', version: 2 },
+};
 
 const createAuth = (token: string | undefined): TripPlanAuthService & { loggedOut: boolean } => {
   const auth = {
@@ -121,6 +154,33 @@ const createClient = (adapter: RequestAdapter) =>
   );
 
 describe('miniapp TripPlanService', () => {
+  it('lists verified candidates and replaces an item with strict authenticated requests', async () => {
+    const requests: Array<{ method: string; path: string; data: unknown }> = [];
+    const service = new TripPlanService(
+      createClient(async (options) => {
+        requests.push({ method: options.method, path: options.url, data: options.data });
+        const data = requests.length === 1 ? candidateList : itemReplacementResult;
+        return { statusCode: 200, data: { success: true, data, requestId: 'replace-1' } };
+      }),
+      createAuth('plan-token'),
+    );
+    await expect(
+      service.listReplacementCandidates(tripId, 1, 1, itemReplacementResult.itemId),
+    ).resolves.toEqual(candidateList);
+    await expect(
+      service.replaceTripPlanItem(tripId, 1, {
+        sourceVersion: 1,
+        dayNumber: 1,
+        itemId: itemReplacementResult.itemId,
+        replacementPlaceId: candidatePlace.id,
+      }),
+    ).resolves.toEqual(itemReplacementResult);
+    expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+      `GET https://api.example.invalid/trips/${tripId}/plan/1/items/${itemReplacementResult.itemId}/replacement-candidates?dayNumber=1`,
+      `POST https://api.example.invalid/trips/${tripId}/plan/1/replace-item`,
+    ]);
+  });
+
   it('sends a strict controlled edit with matching URL/body version', async () => {
     const requests: Array<{ method: string; path: string; data: unknown }> = [];
     const editResult: EditTripPlanResult = {

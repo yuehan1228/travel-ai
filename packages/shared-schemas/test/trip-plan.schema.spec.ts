@@ -8,6 +8,10 @@ import {
   TripPlanItemSchema,
   TripPlanSchema,
   TripPlanWarningSchema,
+  ListTripPlanItemReplacementCandidatesInputSchema,
+  TripPlanItemReplacementCandidateSchema,
+  TripPlanItemReplacementCandidateListSchema,
+  ReplaceTripPlanItemInputSchema,
 } from '../src';
 
 const UUIDS = [
@@ -386,5 +390,63 @@ describe('TripPlan schemas', () => {
         budget: budget(0),
       }).success,
     ).toBe(false);
+  });
+
+  it('keeps replacement contracts strict and paginated', () => {
+    const candidate = {
+      place: place(UUIDS[4]),
+      recommendationReason: '距离合适，且地点数据已验证',
+    };
+    expect(
+      ListTripPlanItemReplacementCandidatesInputSchema.safeParse({
+        sourceVersion: 1,
+        dayNumber: 1,
+        itemId: UUIDS[1],
+        page: 1,
+        pageSize: 20,
+      }).success,
+    ).toBe(true);
+    expect(
+      ListTripPlanItemReplacementCandidatesInputSchema.safeParse({
+        sourceVersion: 1,
+        dayNumber: 1,
+        itemId: UUIDS[1],
+        page: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      ListTripPlanItemReplacementCandidatesInputSchema.safeParse({
+        sourceVersion: 1,
+        dayNumber: 1,
+        itemId: UUIDS[1],
+        pageSize: 21,
+      }).success,
+    ).toBe(false);
+    expect(TripPlanItemReplacementCandidateSchema.safeParse(candidate).success).toBe(true);
+    expect(
+      TripPlanItemReplacementCandidateSchema.safeParse({ ...candidate, itemType: 'attraction' })
+        .success,
+    ).toBe(false);
+    expect(
+      TripPlanItemReplacementCandidateListSchema.safeParse({
+        items: [candidate],
+        pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+      }).success,
+    ).toBe(true);
+    expect(
+      TripPlanItemReplacementCandidateListSchema.safeParse({
+        items: [candidate],
+        pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+        tripId: UUIDS[0],
+      }).success,
+    ).toBe(false);
+    expect(
+      ReplaceTripPlanItemInputSchema.safeParse({
+        sourceVersion: 1,
+        dayNumber: 1,
+        itemId: UUIDS[1],
+        replacementPlaceId: UUIDS[4],
+      }).success,
+    ).toBe(true);
   });
 });

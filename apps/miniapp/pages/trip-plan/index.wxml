@@ -162,6 +162,20 @@
                 <text class="block-label">小贴士</text>
                 <text wx:for="{{item.tips}}" wx:key="*this" class="tip">{{item}}</text>
               </view>
+              <view wx:if="{{item.type === 'attraction' || item.type === 'food' || item.type === 'hotel'}}" class="replacement-block">
+                <button
+                  size="mini"
+                  data-day-number="{{item.dayNumber}}"
+                  data-item-id="{{item.id}}"
+                  bindtap="onLoadReplacementCandidates"
+                  loading="{{replacementLoadingItem === item.dayNumber + ':' + item.id}}"
+                  disabled="{{replacementLoadingItem !== undefined || replacingItem !== undefined}}"
+                >查找可替换地点</button>
+                <view wx:for="{{item.replacementCandidates}}" wx:for-item="candidate" wx:key="id" class="replacement-candidate">
+                  <text>{{candidate.name}}<text wx:if="{{candidate.address}}" class="muted"> · {{candidate.address}}</text><text wx:if="{{candidate.recommendationReason}}" class="muted"> · {{candidate.recommendationReason}}</text></text>
+                  <button size="mini" data-day-number="{{item.dayNumber}}" data-item-id="{{item.id}}" data-place-id="{{candidate.id}}" bindtap="onSelectReplacementCandidate" loading="{{item.isReplacing && item.selectedReplacementPlaceId === candidate.id}}" disabled="{{replacingItem !== undefined}}">更换</button>
+                </view>
+              </view>
             </view>
           </view>
         </view>

@@ -1,6 +1,7 @@
 import type { DailyWeather } from './weather';
 import type { Place } from './place';
 import type { RouteEstimate } from './route';
+import type { PaginationMeta } from './api';
 
 /** Kinds of entries that may appear in a generated itinerary. */
 export const TRIP_PLAN_ITEM_TYPES = ['attraction', 'food', 'transport', 'hotel', 'rest'] as const;
@@ -184,6 +185,51 @@ export interface EditTripPlanItemInput {
 export interface EditTripPlanResult {
   readonly tripId: string;
   readonly sourceVersion: number;
+  readonly version: number;
+  readonly status: 'ready';
+  readonly plan: TripPlan;
+  readonly summary: TripPlanVersionSummary;
+}
+
+/** Strict request for listing verified places that can replace one itinerary item. */
+export interface ListTripPlanItemReplacementCandidatesInput {
+  readonly sourceVersion: number;
+  readonly dayNumber: number;
+  readonly itemId: string;
+  readonly page?: number;
+  readonly pageSize?: number;
+}
+
+/** A verified POI that the server allows as a concrete item replacement. */
+export interface TripPlanItemReplacementCandidate {
+  readonly place: Place;
+  readonly recommendationReason: string;
+  readonly distanceMetersFromOriginal?: number;
+}
+
+/** Candidate list returned as a strict paginated collection. */
+export interface TripPlanItemReplacementCandidateList {
+  readonly items: TripPlanItemReplacementCandidate[];
+  readonly pagination: PaginationMeta;
+}
+
+/** Backwards-compatible descriptive alias used by list endpoints. */
+export type TripPlanItemReplacementCandidateListResult = TripPlanItemReplacementCandidateList;
+
+/** Strict request for replacing one concrete itinerary item's verified POI. */
+export interface ReplaceTripPlanItemInput {
+  readonly sourceVersion: number;
+  readonly dayNumber: number;
+  readonly itemId: string;
+  readonly replacementPlaceId: string;
+}
+
+/** Complete immutable ready version returned after a concrete POI replacement. */
+export interface ReplaceTripPlanItemResult {
+  readonly tripId: string;
+  readonly sourceVersion: number;
+  readonly dayNumber: number;
+  readonly itemId: string;
   readonly version: number;
   readonly status: 'ready';
   readonly plan: TripPlan;

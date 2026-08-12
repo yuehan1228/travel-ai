@@ -3,6 +3,8 @@ import type {
   RegenerateTripPlanDayInput,
   TripPlanVersionSummary,
   TripPlanVersionDiffResult,
+  TripPlanItemReplacementCandidateList,
+  ReplaceTripPlanItemInput,
 } from '@travel-guide/shared-types';
 import { EditTripPlanInputSchema } from '@travel-guide/shared-schemas';
 
@@ -10,6 +12,7 @@ import { tripPlanService } from '../../services/trip-plan.service';
 import {
   applyLatestTripPlanResult,
   applyTripPlanDayRegenerationResult,
+  applyTripPlanItemReplacementResult,
   applyTripPlanEditResult,
   applyTripPlanDiffResult,
   applyTripPlanVersionRestoreResult,
@@ -17,6 +20,7 @@ import {
   applyTripPlanVersionResult,
   beginTripPlanLoad,
   beginTripPlanDayRegeneration,
+  beginTripPlanItemReplacement,
   beginTripPlanEdit,
   beginTripPlanDiff,
   beginTripPlanVersionSwitch,
@@ -57,6 +61,7 @@ interface TripPlanPageData {
   versionPickerIndex: number;
   selectedVersion?: number;
   regeneratingDay?: number;
+  replacingItem?: string;
   regenerateInstructions: Record<string, string>;
   diff?: TripPlanVersionDiffResult;
   diffFromVersion: number;
@@ -73,6 +78,16 @@ interface TripPlanPageData {
     string,
     { description: string; recommendationReason: string; tips: string; estimatedCostCny: string }
   >;
+  replacementCandidates: Record<string, ReplacementCandidateView[]>;
+  replacementLoadingItem?: string;
+  replacementSelection: Record<string, string>;
+}
+
+interface ReplacementCandidateView {
+  readonly id: string;
+  readonly name: string;
+  readonly address: string;
+  readonly recommendationReason: string;
 }
 
 type TripPlanPageDisplayModel = Omit<TripPlanDisplayModel, 'days'> & {
@@ -83,10 +98,14 @@ type TripPlanPageDisplayModel = Omit<TripPlanDisplayModel, 'days'> & {
       editSummary: string;
       items: Array<
         TripPlanDisplayModel['days'][number]['items'][number] & {
+          dayNumber: number;
           editDescription: string;
           editRecommendationReason: string;
           editTips: string;
           editEstimatedCostCny: string;
+          replacementCandidates: ReplacementCandidateView[];
+          isReplacing: boolean;
+          selectedReplacementPlaceId?: string;
         }
       >;
     }
@@ -142,11 +161,19 @@ const syncPage = (
               const draft = page.data.editItemDrafts[`${day.dayNumber}:${item.id}`];
               return {
                 ...item,
+                dayNumber: day.dayNumber,
                 editDescription: draft?.description ?? item.description,
                 editRecommendationReason: draft?.recommendationReason ?? item.recommendationReason,
                 editTips: draft?.tips ?? item.tips.join('\n'),
                 editEstimatedCostCny:
                   draft?.estimatedCostCny ?? item.estimatedCostText.replace(/^¥/, ''),
+                replacementCandidates:
+                  page.data.replacementCandidates[`${day.dayNumber}:${item.id}`] ?? [],
+                isReplacing:
+                  state.replacingItem === `${day.dayNumber}:${item.id}` ||
+                  page.data.replacementLoadingItem === `${day.dayNumber}:${item.id}`,
+                selectedReplacementPlaceId:
+                  page.data.replacementSelection[`${day.dayNumber}:${item.id}`],
               };
             }),
           })),
@@ -165,6 +192,7 @@ const syncPage = (
     versionPickerIndex: selectedVersionIndex(readyVersions, state.selectedVersion),
     selectedVersion: state.selectedVersion,
     regeneratingDay: state.regeneratingDay,
+    replacingItem: state.replacingItem,
     diff: state.diff,
     diffFromVersion: state.diffFromVersion ?? 0,
     diffToVersion: state.diffToVersion ?? 0,
@@ -177,6 +205,9 @@ const syncPage = (
     editSummary: page.data.editSummary || display?.summary || '',
     editDayDrafts: page.data.editDayDrafts,
     editItemDrafts: page.data.editItemDrafts,
+    replacementCandidates: page.data.replacementCandidates,
+    replacementLoadingItem: page.data.replacementLoadingItem,
+    replacementSelection: page.data.replacementSelection,
   });
 };
 
@@ -295,6 +326,167 @@ const regenerateDay = async (
     // A failed replacement keeps the old immutable plan visible for retry.
     syncPage(page, nextState, oldPlan);
   }
+};
+
+const replacementItemKey = (dayNumber: number, itemId: string): string => `${dayNumber}:${itemId}`;
+
+const replacementItemIdFromEvent = (event: TripPlanPageEvent): string | undefined => {
+  const value = event.currentTarget?.dataset?.itemId;
+  return value !== undefined && value.length > 0 ? value : undefined;
+};
+
+const replacementPlaceIdFromEvent = (event: TripPlanPageEvent): string | undefined => {
+  const value = event.currentTarget?.dataset?.placeId;
+  return value !== undefined && value.length > 0 ? value : undefined;
+};
+
+const loadReplacementCandidates = async (
+  page: PageInstance<TripPlanPageData>,
+  dayNumber: number,
+  itemId: string,
+): Promise<void> => {
+  const state = getViewState(page);
+  const itemKey = replacementItemKey(dayNumber, itemId);
+  if (
+    page.data.tripId.length === 0 ||
+    page.data.replacementLoadingItem !== undefined ||
+    state.replacingItem !== undefined ||
+    state.selectedVersion === undefined ||
+    state.status !== 'ready'
+  ) {
+    return;
+  }
+  page.setData({ replacementLoadingItem: itemKey });
+  syncPage(page, state, page.data.plan);
+  try {
+    const result: TripPlanItemReplacementCandidateList =
+      await tripPlanService.listReplacementCandidates(
+        page.data.tripId,
+        state.selectedVersion,
+        dayNumber,
+        itemId,
+      );
+    if (!viewStates.has(page)) return;
+    page.setData({
+      replacementCandidates: {
+        ...page.data.replacementCandidates,
+        [itemKey]: result.items.map(({ place, recommendationReason }) => ({
+          id: place.id,
+          name: place.name,
+          address: place.address,
+          recommendationReason,
+        })),
+      },
+      replacementLoadingItem: undefined,
+    });
+    syncPage(page, getViewState(page), page.data.plan);
+  } catch (error: unknown) {
+    if (!viewStates.has(page)) return;
+    const nextState = applyTripPlanViewError(getViewState(page), getTripPlanUserMessage(error));
+    setViewState(page, nextState);
+    page.setData({ replacementLoadingItem: undefined });
+    syncPage(page, nextState, page.data.plan);
+  }
+};
+
+const replaceTripPlanItem = async (
+  page: PageInstance<TripPlanPageData>,
+  dayNumber: number,
+  itemId: string,
+  replacementPlaceId: string,
+): Promise<void> => {
+  const state = getViewState(page);
+  const itemKey = replacementItemKey(dayNumber, itemId);
+  if (
+    page.data.tripId.length === 0 ||
+    state.replacingItem !== undefined ||
+    page.data.replacementLoadingItem !== undefined ||
+    state.selectedVersion === undefined ||
+    state.status !== 'ready'
+  ) {
+    return;
+  }
+  const input: ReplaceTripPlanItemInput = {
+    sourceVersion: state.selectedVersion,
+    dayNumber,
+    itemId,
+    replacementPlaceId,
+  };
+  const oldPlan = page.data.plan;
+  const nextState = beginTripPlanItemReplacement(state, itemKey);
+  setViewState(page, nextState);
+  syncPage(page, nextState, oldPlan);
+  try {
+    const result = await tripPlanService.replaceTripPlanItem(
+      page.data.tripId,
+      input.sourceVersion,
+      input,
+    );
+    if (!viewStates.has(page)) return;
+    const applied = applyTripPlanItemReplacementResult(getViewState(page), result);
+    setViewState(page, applied);
+    page.setData({
+      replacementCandidates: {
+        ...page.data.replacementCandidates,
+        [itemKey]: [],
+      },
+      replacementSelection: {
+        ...page.data.replacementSelection,
+        [itemKey]: '',
+      },
+    });
+    syncPage(page, applied, displayPlan(applied));
+  } catch (error: unknown) {
+    if (!viewStates.has(page)) return;
+    const failed = applyTripPlanViewError(getViewState(page), getTripPlanUserMessage(error));
+    setViewState(page, failed);
+    // Keep the old immutable plan and selected candidate for an immediate retry.
+    syncPage(page, failed, oldPlan);
+  }
+};
+
+const selectReplacementCandidate = (
+  page: PageInstance<TripPlanPageData>,
+  dayNumber: number,
+  itemId: string,
+  placeId: string,
+): void => {
+  const itemKey = replacementItemKey(dayNumber, itemId);
+  page.setData({
+    replacementSelection: {
+      ...page.data.replacementSelection,
+      [itemKey]: placeId,
+    },
+  });
+};
+
+const confirmReplacementCandidate = (
+  page: PageInstance<TripPlanPageData>,
+  dayNumber: number,
+  itemId: string,
+  placeId: string,
+): void => {
+  const candidate = page.data.replacementCandidates[replacementItemKey(dayNumber, itemId)]?.find(
+    (item) => item.id === placeId,
+  );
+  if (candidate === undefined) return;
+  selectReplacementCandidate(page, dayNumber, itemId, placeId);
+  const run = (): void => {
+    void replaceTripPlanItem(page, dayNumber, itemId, placeId);
+  };
+  if (typeof wx.showModal !== 'function') {
+    run();
+    return;
+  }
+  wx.showModal({
+    title: '确认更换地点',
+    content: `将“${candidate.name}”设为本条行程地点？`,
+    confirmText: '确认更换',
+    cancelText: '取消',
+    success: (result) => {
+      if (result.confirm) run();
+    },
+  });
 };
 
 type EditDayField = 'summary';
@@ -582,6 +774,8 @@ Page<TripPlanPageData>({
     editSummary: '',
     editDayDrafts: {},
     editItemDrafts: {},
+    replacementCandidates: {},
+    replacementSelection: {},
   },
 
   onLoad(this: PageInstance<TripPlanPageData>, options: TripPlanRouteOptions): void {
@@ -643,6 +837,27 @@ Page<TripPlanPageData>({
     const dayNumber = dayNumberFromEvent(event);
     if (dayNumber === undefined) return;
     void regenerateDay(this, dayNumber);
+  },
+
+  onLoadReplacementCandidates(
+    this: PageInstance<TripPlanPageData>,
+    event: TripPlanPageEvent,
+  ): void {
+    const dayNumber = dayNumberFromEvent(event);
+    const itemId = replacementItemIdFromEvent(event);
+    if (dayNumber === undefined || itemId === undefined) return;
+    void loadReplacementCandidates(this, dayNumber, itemId);
+  },
+
+  onSelectReplacementCandidate(
+    this: PageInstance<TripPlanPageData>,
+    event: TripPlanPageEvent,
+  ): void {
+    const dayNumber = dayNumberFromEvent(event);
+    const itemId = replacementItemIdFromEvent(event);
+    const placeId = replacementPlaceIdFromEvent(event);
+    if (dayNumber === undefined || itemId === undefined || placeId === undefined) return;
+    confirmReplacementCandidate(this, dayNumber, itemId, placeId);
   },
 
   onEditSummaryInput(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {

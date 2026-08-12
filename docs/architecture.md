@@ -234,6 +234,22 @@ reservation 之前验证失败，不创建新版本。
 旧 JSON 和历史子表行不可变。小程序只在 ready 版本显示摘要、行程描述/推荐理由/小贴士/金额编辑入口，不提供 warnings 编辑控件，使用单飞 loading，成功切换版本，失败保留旧攻略和输入草稿；认证失效仍集中由
 `AuthService` 处理。当前边界仍不包含聊天、地图、分享、实时价格和多人协作。
 
+### TripPlan 具体地点替换（TASK-022）
+
+`GET /trips/:id/plan/:version/items/:itemId/replacement-candidates` 与
+`POST /trips/:id/plan/:version/replace-item` 均受 `AuthGuard` 保护。候选列表由服务端从既有 `PlaceService` 读取并经过共享
+Schema 校验，仅允许 `attraction`、`food`、`hotel` 条目，排除原地点、重复 Provider POI、计划中已使用的 POI 和无坐标 POI，最多 20 条。
+候选请求必须带 `dayNumber`，可选 `page` 和 `pageSize`（`page >= 1`、`1 <= pageSize <= 20`）；分页边界透传给 `PlaceService`，
+响应严格为 `{ items, pagination }`，候选包含 `place` 与 `recommendationReason`，不添加 `itemType` 等额外字段。替换请求和结果包含
+`dayNumber`，服务端只允许替换该日中的条目。
+替换请求的 POI ID 只能来自服务端重新验证的候选列表，客户端不能提交 Place 事实。
+
+替换在读取 ready 源快照后创建不可变递增版本；通过既有 `RouteService` 重算替换项前后相邻的真实路线，任一受影响路线不可用都返回
+`TRIP_PLAN_REPLACEMENT_UNAVAILABLE`，不伪造距离/时长，也不静默删除旧路线。除目标地点和受影响路线外，日期、时间、天气、其他日期和其余事实字段保持不变，
+结果再次通过完整 `TripPlanSchema`，不调用 LLM。`operation='replace-item'` 与生成、单日重生成、恢复、编辑共用 Trip 行级原子
+`generating` reservation；成功事务写入完整版本快照，失败仅保留 `failed` 元数据并恢复原 `ready` 状态，无 Redis、队列或 Migration。
+小程序详情页只用原生文本列出候选、二次确认并单飞提交，成功切换版本，失败保留旧快照和选择，认证失效由 `AuthService` 处理；不引入地图、HTML、chat 或实时价格。
+
 ### 小程序 TripPlan 生成流程与只读详情（TASK-018）
 
 首页提交由轻量表单状态转换为严格 `CreateTripInputSchema` 输入，先检查 `AuthService` 登录状态，再保存本地草稿并调用

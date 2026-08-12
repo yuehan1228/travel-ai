@@ -11,6 +11,10 @@ import {
   TripPlanVersionDiffInputSchema,
   TripPlanVersionDiffResultSchema,
   TripPlanVersionListResultSchema,
+  ListTripPlanItemReplacementCandidatesInputSchema,
+  TripPlanItemReplacementCandidateListSchema,
+  ReplaceTripPlanItemInputSchema,
+  ReplaceTripPlanItemResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
   EditTripPlanInput,
@@ -23,6 +27,10 @@ import type {
   TripPlanGenerationResult,
   TripPlanVersionDiffResult,
   TripPlanVersionListResult,
+  ListTripPlanItemReplacementCandidatesInput,
+  TripPlanItemReplacementCandidateList,
+  ReplaceTripPlanItemInput,
+  ReplaceTripPlanItemResult,
 } from '@travel-guide/shared-types';
 
 import { AuthService, authService } from './auth.service';
@@ -161,6 +169,86 @@ export class TripPlanService {
       data: parsedInput,
       schema: EditTripPlanResultSchema,
     });
+  }
+
+  public async listReplacementCandidates(
+    id: string,
+    version: number,
+    input: ListTripPlanItemReplacementCandidatesInput,
+  ): Promise<TripPlanItemReplacementCandidateList>;
+  public async listReplacementCandidates(
+    id: string,
+    version: number,
+    dayNumber: number,
+    itemId: string,
+    page?: number,
+    pageSize?: number,
+  ): Promise<TripPlanItemReplacementCandidateList>;
+  public async listReplacementCandidates(
+    id: string,
+    version: number,
+    inputOrDayNumber: ListTripPlanItemReplacementCandidatesInput | number,
+    itemId?: string,
+    page?: number,
+    pageSize?: number,
+  ): Promise<TripPlanItemReplacementCandidateList> {
+    const tripId = TripIdSchema.parse(id);
+    const input: ListTripPlanItemReplacementCandidatesInput =
+      typeof inputOrDayNumber === 'number'
+        ? {
+            sourceVersion: version,
+            dayNumber: inputOrDayNumber,
+            itemId: itemId ?? '',
+            ...(page === undefined ? {} : { page }),
+            ...(pageSize === undefined ? {} : { pageSize }),
+          }
+        : inputOrDayNumber;
+    const parsedInput = ListTripPlanItemReplacementCandidatesInputSchema.parse(input);
+    if (parsedInput.sourceVersion !== version) {
+      throw new RequestError({
+        code: 'INVALID_RESPONSE',
+        message: 'Replacement source version does not match the URL version',
+      });
+    }
+    const query = [`dayNumber=${parsedInput.dayNumber}`];
+    if (parsedInput.page !== undefined) query.push(`page=${parsedInput.page}`);
+    if (parsedInput.pageSize !== undefined) query.push(`pageSize=${parsedInput.pageSize}`);
+    return this.request<TripPlanItemReplacementCandidateList>({
+      method: 'GET',
+      path: `/trips/${encodeURIComponent(tripId)}/plan/${parsedInput.sourceVersion}/items/${encodeURIComponent(parsedInput.itemId)}/replacement-candidates?${query.join('&')}`,
+      schema: TripPlanItemReplacementCandidateListSchema,
+    });
+  }
+
+  public async replaceTripPlanItem(
+    id: string,
+    version: number,
+    input: ReplaceTripPlanItemInput,
+  ): Promise<ReplaceTripPlanItemResult> {
+    const tripId = TripIdSchema.parse(id);
+    const parsedVersion = parseVersion(version);
+    const parsedInput = ReplaceTripPlanItemInputSchema.parse(input);
+    if (parsedInput.sourceVersion !== parsedVersion) {
+      throw new RequestError({
+        code: 'INVALID_RESPONSE',
+        message: 'Replacement source version does not match the URL version',
+      });
+    }
+    const result = await this.request<ReplaceTripPlanItemResult>({
+      method: 'POST',
+      path: `/trips/${encodeURIComponent(tripId)}/plan/${parsedVersion}/replace-item`,
+      data: parsedInput,
+      schema: ReplaceTripPlanItemResultSchema,
+    });
+    if (
+      result.tripId !== tripId ||
+      result.sourceVersion !== parsedInput.sourceVersion ||
+      result.dayNumber !== parsedInput.dayNumber ||
+      result.itemId !== parsedInput.itemId
+    ) {
+      throw new RequestError({ code: 'INVALID_RESPONSE', message: 'Replacement result mismatch' });
+    }
+    return result;
   }
 
   private async request<TResponse>(options: RequestOptions<TResponse>): Promise<TResponse> {

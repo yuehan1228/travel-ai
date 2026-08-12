@@ -6,6 +6,11 @@ import {
   EditTripPlanResultSchema,
   GenerateTripPlanInputSchema,
   PlaceListResultSchema,
+  PlaceSchema,
+  ListTripPlanItemReplacementCandidatesInputSchema,
+  TripPlanItemReplacementCandidateListSchema,
+  ReplaceTripPlanItemInputSchema,
+  ReplaceTripPlanItemResultSchema,
   RegenerateTripPlanDayInputSchema,
   RegenerateTripPlanDayResultSchema,
   RestoreTripPlanVersionInputSchema,
@@ -18,6 +23,7 @@ import {
   TripPlanVersionListResultSchema,
   WeatherResultSchema,
   MAX_TRIP_PLAN_VERSIONS,
+  MAX_TRIP_PLAN_ITEM_REPLACEMENT_CANDIDATES,
 } from '@travel-guide/shared-schemas';
 import type {
   CreateTripInput,
@@ -42,6 +48,12 @@ import type {
   RouteEstimate,
   RouteOrderResult,
   WeatherResult,
+  TripPlanItemReplacementCandidateList,
+  ListTripPlanItemReplacementCandidatesInput,
+  ReplaceTripPlanItemInput,
+  ReplaceTripPlanItemResult,
+  Place,
+  TripPlanItem,
 } from '@travel-guide/shared-types';
 
 import { PlaceService } from '../places/place.service';
@@ -138,6 +150,15 @@ const unavailableError = (): TripPlanException =>
     'There is not enough verified data to generate a TripPlan',
   );
 
+const replacementUnavailableError = (): TripPlanException =>
+  new TripPlanException(
+    'TRIP_PLAN_REPLACEMENT_UNAVAILABLE',
+    422,
+    'A real route for the replacement is unavailable',
+  );
+
+const MAX_REPLACEMENT_CANDIDATE_PAGES = 50;
+
 const asCode = (error: unknown): string | undefined =>
   typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
     ? error.code
@@ -162,6 +183,47 @@ const preferenceCategories = (input: CreateTripInput): PlaceCategory[] => {
     if (preference === 'nature' || preference === 'hiking') categories.add('park');
   }
   return [...categories];
+};
+
+const replacementCategories = (type: TripPlanItem['type']): PlaceCategory[] => {
+  switch (type) {
+    case 'attraction':
+      return ['attraction', 'museum', 'park'];
+    case 'food':
+      return ['restaurant', 'local_food', 'cafe'];
+    case 'hotel':
+      return ['hotel_area'];
+    default:
+      return [];
+  }
+};
+
+const isReplacementItemType = (
+  item: TripPlanItem,
+): item is TripPlanItem & { type: 'attraction' | 'food' | 'hotel'; place: Place } =>
+  (item.type === 'attraction' || item.type === 'food' || item.type === 'hotel') &&
+  item.place !== undefined;
+
+const hasUsablePlaceLocation = (place: Place): boolean =>
+  typeof place.location === 'object' &&
+  place.location !== null &&
+  Number.isFinite(place.location.longitude) &&
+  Number.isFinite(place.location.latitude);
+
+const itemById = (
+  plan: TripPlan,
+  itemId: string,
+  dayNumber?: number,
+): { day: TripPlan['days'][number]; item: TripPlanItem; index: number } | undefined => {
+  for (const day of plan.days) {
+    if (dayNumber !== undefined && day.dayNumber !== dayNumber) continue;
+    const index = day.items.findIndex((item) => item.id === itemId);
+    if (index >= 0) {
+      const item = day.items[index];
+      if (item !== undefined) return { day, item, index };
+    }
+  }
+  return undefined;
 };
 
 const generationResult = (record: TripPlanVersionRecord): TripPlanGenerationResult => {
@@ -532,6 +594,346 @@ export class TripPlanService {
       const validatedResult = RegenerateTripPlanDayResultSchema.safeParse(result);
       if (!validatedResult.success) throw persistenceError();
       return validatedResult.data;
+    } catch (error: unknown) {
+      const mapped = error instanceof TripPlanException ? error : mapContextError(error);
+      try {
+        const failedAt = this.clock.now();
+        if (Number.isNaN(failedAt.getTime())) throw persistenceError();
+        await this.repository.markFailed(userId, tripId, reservation, failedAt);
+      } catch {
+        throw persistenceError();
+      }
+      throw mapped;
+    }
+  }
+
+  /** List only server-verified POIs that may replace one concrete itinerary place. */
+  public async listReplacementCandidates(
+    userId: string,
+    tripId: string,
+    version: number,
+    input: ListTripPlanItemReplacementCandidatesInput,
+  ): Promise<TripPlanItemReplacementCandidateList> {
+    this.assertTripId(tripId);
+    const parsedInput = ListTripPlanItemReplacementCandidatesInputSchema.safeParse(input);
+    if (!parsedInput.success) throw validationError();
+    if (parsedInput.data.sourceVersion !== version) throw validationError();
+    const trip = await this.requireTripForVersionOperation(userId, tripId);
+    if (trip.status === 'generating') throw inProgressError();
+
+    let sourceRecord: TripPlanVersionRecord | undefined;
+    try {
+      sourceRecord = await this.repository.findVersionForUser(
+        userId,
+        tripId,
+        parsedInput.data.sourceVersion,
+      );
+    } catch {
+      throw persistenceError();
+    }
+    if (
+      sourceRecord === undefined ||
+      sourceRecord.status !== 'ready' ||
+      sourceRecord.plan === undefined
+    ) {
+      throw planNotFoundError();
+    }
+    const sourcePlan = TripPlanSchema.safeParse(sourceRecord.plan);
+    if (!sourcePlan.success || sourcePlan.data.tripId !== tripId) throw persistenceError();
+    const located = itemById(sourcePlan.data, parsedInput.data.itemId, parsedInput.data.dayNumber);
+    if (located === undefined || !isReplacementItemType(located.item)) {
+      throw entityMismatchError();
+    }
+
+    const categories = replacementCategories(located.item.type);
+    if (categories.length === 0) throw entityMismatchError();
+    let places: PlaceListResult;
+    try {
+      const fetched = await this.placeService.searchPlaces({
+        cityName: sourcePlan.data.cityName,
+        ...(trip.inputSnapshot.destination.cityCode === undefined
+          ? {}
+          : { cityCode: trip.inputSnapshot.destination.cityCode }),
+        categories,
+        page: parsedInput.data.page ?? 1,
+        pageSize: parsedInput.data.pageSize ?? MAX_TRIP_PLAN_ITEM_REPLACEMENT_CANDIDATES,
+      });
+      const parsed = PlaceListResultSchema.safeParse(fetched);
+      if (parsed.success) {
+        places = parsed.data;
+      } else {
+        // Keep the replacement boundary defensive even when a fake/legacy adapter
+        // returns a partially malformed list: invalid or coordinate-less POIs are skipped.
+        const rawItems =
+          typeof fetched === 'object' && fetched !== null && 'items' in fetched
+            ? (fetched as { items?: unknown }).items
+            : undefined;
+        const validItems = Array.isArray(rawItems)
+          ? rawItems.flatMap((item) => {
+              const valid = PlaceSchema.safeParse(item);
+              return valid.success ? [valid.data] : [];
+            })
+          : [];
+        places = {
+          items: validItems,
+          pagination: {
+            page: parsedInput.data.page ?? 1,
+            pageSize: parsedInput.data.pageSize ?? MAX_TRIP_PLAN_ITEM_REPLACEMENT_CANDIDATES,
+            total: validItems.length,
+            totalPages:
+              validItems.length === 0
+                ? 0
+                : Math.ceil(
+                    validItems.length /
+                      (parsedInput.data.pageSize ?? MAX_TRIP_PLAN_ITEM_REPLACEMENT_CANDIDATES),
+                  ),
+          },
+          fetchedAt: sourceRecord.createdAt.toISOString(),
+        };
+      }
+    } catch (error: unknown) {
+      throw mapContextError(error);
+    }
+
+    const seen = new Set<string>();
+    const original = located.item.place;
+    const existingPlaceKeys = new Set<string>();
+    for (const day of sourcePlan.data.days) {
+      for (const item of day.items) {
+        if (item.place !== undefined) {
+          existingPlaceKeys.add(item.place.id);
+          existingPlaceKeys.add(`${item.place.provider}\u0000${item.place.providerPlaceId}`);
+        }
+      }
+    }
+    const candidates = places.items
+      .filter((place) => hasUsablePlaceLocation(place))
+      .filter((place) => place.category === undefined || categories.includes(place.category))
+      .filter(
+        (place) =>
+          place.id !== original.id &&
+          place.providerPlaceId !== original.providerPlaceId &&
+          !existingPlaceKeys.has(place.id) &&
+          !existingPlaceKeys.has(`${place.provider}\u0000${place.providerPlaceId}`),
+      )
+      .filter((place) => {
+        const key = `${place.provider}\u0000${place.providerPlaceId}`;
+        if (seen.has(key) || seen.has(place.id)) return false;
+        seen.add(key);
+        seen.add(place.id);
+        return true;
+      })
+      .slice(0, MAX_TRIP_PLAN_ITEM_REPLACEMENT_CANDIDATES)
+      .map((place) => ({
+        place,
+        recommendationReason: `与原地点同属${place.categoryText}，且已通过地点数据校验`,
+      }));
+    const result: TripPlanItemReplacementCandidateList = {
+      items: candidates,
+      pagination: places.pagination,
+    };
+    const validated = TripPlanItemReplacementCandidateListSchema.safeParse(result);
+    if (!validated.success) throw persistenceError();
+    return validated.data;
+  }
+
+  /** Replace one verified POI and materialise a new immutable version without invoking LLM. */
+  public async replaceTripPlanItem(
+    userId: string,
+    tripId: string,
+    version: number,
+    input: ReplaceTripPlanItemInput,
+  ): Promise<ReplaceTripPlanItemResult> {
+    this.assertTripId(tripId);
+    const parsedInput = ReplaceTripPlanItemInputSchema.safeParse(input);
+    if (!parsedInput.success || parsedInput.data.sourceVersion !== version) {
+      throw validationError();
+    }
+    const now = this.clock.now();
+    if (Number.isNaN(now.getTime())) throw validationError();
+    const trip = await this.requireTripForVersionOperation(userId, tripId);
+    if (trip.status === 'generating') throw inProgressError();
+
+    let sourceRecord: TripPlanVersionRecord | undefined;
+    try {
+      sourceRecord = await this.repository.findVersionForUser(
+        userId,
+        tripId,
+        parsedInput.data.sourceVersion,
+      );
+    } catch {
+      throw persistenceError();
+    }
+    if (
+      sourceRecord === undefined ||
+      sourceRecord.status !== 'ready' ||
+      sourceRecord.plan === undefined
+    ) {
+      throw planNotFoundError();
+    }
+    const sourcePlan = TripPlanSchema.safeParse(sourceRecord.plan);
+    if (!sourcePlan.success || sourcePlan.data.tripId !== tripId) throw persistenceError();
+    const located = itemById(sourcePlan.data, parsedInput.data.itemId, parsedInput.data.dayNumber);
+    if (located === undefined || !isReplacementItemType(located.item)) {
+      throw entityMismatchError();
+    }
+
+    // Re-read candidates at mutation time. The submitted ID is accepted only when it
+    // belongs to this server-generated, schema-validated allowlist.
+    const candidateInput = {
+      sourceVersion: parsedInput.data.sourceVersion,
+      dayNumber: parsedInput.data.dayNumber,
+      itemId: parsedInput.data.itemId,
+      page: 1,
+      pageSize: MAX_TRIP_PLAN_ITEM_REPLACEMENT_CANDIDATES,
+    };
+    let candidateList = await this.listReplacementCandidates(
+      userId,
+      tripId,
+      parsedInput.data.sourceVersion,
+      candidateInput,
+    );
+    let candidate = candidateList.items.find(
+      (item) => item.place.id === parsedInput.data.replacementPlaceId,
+    );
+    const lastPage = Math.min(candidateList.pagination.totalPages, MAX_REPLACEMENT_CANDIDATE_PAGES);
+    for (let page = 2; candidate === undefined && page <= lastPage; page += 1) {
+      candidateList = await this.listReplacementCandidates(userId, tripId, version, {
+        ...candidateInput,
+        page,
+      });
+      candidate = candidateList.items.find(
+        (item) => item.place.id === parsedInput.data.replacementPlaceId,
+      );
+    }
+    if (candidate === undefined) throw entityMismatchError();
+
+    const replacementPlace = candidate.place;
+    const mode = trip.inputSnapshot.transportPreference === 'driving' ? 'driving' : 'walking';
+    const dayItems = located.day.items;
+    const previous = located.index > 0 ? dayItems[located.index - 1] : undefined;
+    const next = located.index + 1 < dayItems.length ? dayItems[located.index + 1] : undefined;
+    const routeFor = async (
+      origin: Place | undefined,
+      destination: Place | undefined,
+    ): Promise<RouteEstimate | undefined> => {
+      if (origin === undefined || destination === undefined) return undefined;
+      try {
+        const estimate = await this.routeService.estimateRoute({
+          origin: { location: origin.location, placeId: origin.id },
+          destination: { location: destination.location, placeId: destination.id },
+          mode,
+        });
+        if (estimate.dataSource === 'unavailable') throw replacementUnavailableError();
+        return estimate;
+      } catch (error: unknown) {
+        if (error instanceof TripPlanException) throw error;
+        if (asCode(error) === 'ROUTE_UNAVAILABLE') throw replacementUnavailableError();
+        throw mapContextError(error);
+      }
+    };
+
+    let reserved: TripPlanEditReservationResult;
+    try {
+      if (this.repository.reserveReplaceItem !== undefined) {
+        reserved = await this.repository.reserveReplaceItem(
+          userId,
+          tripId,
+          parsedInput.data.sourceVersion,
+          parsedInput.data.itemId,
+          now,
+        );
+      } else if (this.repository.reserveItemReplacement !== undefined) {
+        reserved = await this.repository.reserveItemReplacement(
+          userId,
+          tripId,
+          parsedInput.data.sourceVersion,
+          parsedInput.data.itemId,
+          now,
+        );
+      } else {
+        const fallback = await this.repository.reserveGeneration(userId, tripId, now);
+        reserved =
+          fallback.status === 'reserved'
+            ? {
+                status: 'reserved',
+                reservation: {
+                  ...fallback.reservation,
+                  operation: 'replace-item' as const,
+                  sourceVersion: parsedInput.data.sourceVersion,
+                  itemId: parsedInput.data.itemId,
+                  previousTripStatus: fallback.reservation.previousTripStatus ?? trip.status,
+                },
+              }
+            : fallback;
+      }
+    } catch {
+      throw persistenceError();
+    }
+    if (reserved.status === 'not_found') throw tripNotFoundError();
+    if (reserved.status === 'in_progress') throw inProgressError();
+    if (reserved.status === 'source_not_ready') throw planNotFoundError();
+    const reservation = {
+      ...reserved.reservation,
+      operation: 'replace-item' as const,
+      sourceVersion: parsedInput.data.sourceVersion,
+      itemId: parsedInput.data.itemId,
+      previousTripStatus: reserved.reservation.previousTripStatus ?? trip.status,
+    };
+
+    try {
+      const replacementItem: TripPlanItem = {
+        ...located.item,
+        name: replacementPlace.name,
+        place: replacementPlace,
+      };
+      const beforeRoute = await routeFor(previous?.place, replacementPlace);
+      const afterRoute = await routeFor(replacementPlace, next?.place);
+      const replacedDays = sourcePlan.data.days.map((day) => {
+        if (day.dayNumber !== located.day.dayNumber) return day;
+        return {
+          ...day,
+          items: day.items.map((item, index) => {
+            if (index === located.index) {
+              return {
+                ...replacementItem,
+                ...(beforeRoute === undefined ? { route: undefined } : { route: beforeRoute }),
+              };
+            }
+            if (index === located.index + 1 && next !== undefined) {
+              return {
+                ...item,
+                ...(afterRoute === undefined ? { route: undefined } : { route: afterRoute }),
+              };
+            }
+            return item;
+          }),
+        };
+      });
+      const replacedPlan = TripPlanSchema.parse({
+        ...sourcePlan.data,
+        days: replacedDays,
+        generatedAt: now.toISOString(),
+      });
+      let saved: TripPlanVersionRecord;
+      try {
+        saved = await this.repository.saveReady(userId, tripId, reservation, replacedPlan, now);
+      } catch {
+        throw persistenceError();
+      }
+      const result: ReplaceTripPlanItemResult = {
+        tripId,
+        sourceVersion: parsedInput.data.sourceVersion,
+        dayNumber: parsedInput.data.dayNumber,
+        itemId: parsedInput.data.itemId,
+        version: saved.version,
+        status: 'ready',
+        plan: replacedPlan,
+        summary: tripPlanVersionSummary(saved),
+      };
+      const validated = ReplaceTripPlanItemResultSchema.safeParse(result);
+      if (!validated.success) throw persistenceError();
+      return validated.data;
     } catch (error: unknown) {
       const mapped = error instanceof TripPlanException ? error : mapContextError(error);
       try {

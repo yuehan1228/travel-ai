@@ -166,6 +166,22 @@ LLM、天气、POI 或路线 Provider。编辑与生成、单日重生成、恢�
 小程序 `TripPlanService.editTripPlanVersion` 和攻略详情页仅在 ready 版本显示摘要、行程描述/推荐理由/小贴士/金额编辑入口，不提供 warnings 编辑控件，使用单飞提交；成功切换到新版本，失败保留
 当前攻略和输入草稿，`AUTH_TOKEN_INVALID` 继续由 `AuthService` 清理。当前仍不实现聊天、地图、分享、实时价格或多人协作。
 
+### TripPlan 具体地点替换（TASK-022）
+
+服务端新增受认证的 `GET /trips/:id/plan/:version/items/:itemId/replacement-candidates` 和
+`POST /trips/:id/plan/:version/replace-item`。候选只从已验证 `PlaceService` POI 中筛选
+`attraction`、`food`、`hotel` 条目，排除原地点、计划中重复地点、重复 Provider POI 和无坐标数据，最多返回 20 条；
+候选查询必须提供所属 `dayNumber`，可通过 `page`/`pageSize`（`pageSize` 最大 20）分页，响应严格为 `{ items, pagination }`，
+每项包含验证后的 `place` 和 `recommendationReason`（不额外暴露 `itemType`）；
+替换输入同样必须提供 `dayNumber`，服务端确认条目属于该日。
+替换请求的 `replacementPlaceId` 必须属于服务端重新验证的候选列表。替换会通过既有 `RouteService` 重算受影响的前后真实路线，
+路线不可用时返回 `TRIP_PLAN_REPLACEMENT_UNAVAILABLE`，不会伪造或静默保留旧路线；天气、日期、时间和其他日期保持不变。
+
+替换不调用 LLM，完整结果重新通过 `TripPlanSchema`，并使用 `operation='replace-item'` 与生成、单日重生成、恢复和编辑共享
+Trip 行级原子 reservation。成功保存递增的新不可变版本，失败只保留 `failed` 元数据并恢复原有 `ready` 状态；不引入 Redis、队列或 Migration。
+小程序详情页以普通文本展示候选，选择后进行二次确认并使用单飞 loading；成功切换到新版本，失败保留旧攻略和当前选择，认证失效继续由
+`AuthService` 清理 Token。仍不提供地图、HTML、chat 或实时价格。
+
 访问顺序建议使用需要认证的 `POST /routes/order`，在真实路线矩阵上运行确定性的最近邻（nearest-neighbor）贪心算法。
 请求可指定 `startId` 和 `endId`；未指定起点时按点 ID 字典序选择，候选路线按预计耗时、距离和目标 ID 依次打破平局，
 并将指定终点保留到最后。不可用的两点路线不会参与候选；若无法覆盖全部点则返回 `ROUTE_ORDER_UNAVAILABLE`。结果明确标记

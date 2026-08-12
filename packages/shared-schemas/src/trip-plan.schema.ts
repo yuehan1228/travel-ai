@@ -21,6 +21,11 @@ import {
   type EditTripPlanDayInput,
   type EditTripPlanItemInput,
   type EditTripPlanResult,
+  type ListTripPlanItemReplacementCandidatesInput,
+  type TripPlanItemReplacementCandidate,
+  type TripPlanItemReplacementCandidateList,
+  type ReplaceTripPlanItemInput,
+  type ReplaceTripPlanItemResult,
   type TripPlanGenerationResult,
   type TripPlanVersionListResult,
   type TripPlanVersionStatus,
@@ -54,6 +59,7 @@ import {
 } from './common.schema';
 import { IsoDateSchema } from './trip-input.schema';
 import { DailyWeatherSchema } from './weather.schema';
+import { PaginationMetaSchema } from './api.schema';
 
 export const MAX_TRIP_PLAN_DAYS = 14;
 export const MAX_TRIP_PLAN_ITEMS_PER_DAY = 20;
@@ -62,6 +68,7 @@ export const MAX_TRIP_PLAN_FOOD_RECOMMENDATIONS = 20;
 export const MAX_TRIP_PLAN_TIPS = 20;
 export const MAX_TRIP_PLAN_WARNINGS_PER_DAY = 20;
 export const MAX_TRIP_PLAN_MONEY_CNY = 100_000_000;
+export const MAX_TRIP_PLAN_ITEM_REPLACEMENT_CANDIDATES = 20;
 
 const MILLISECONDS_PER_DAY = 86_400_000;
 const ISO_DATE_PARTS = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -860,6 +867,134 @@ export const EditTripPlanResultSchema: z.ZodType<EditTripPlanResult, z.ZodTypeDe
       });
     }
   });
+
+/** Strict request for listing replacement candidates for one source item. */
+export const ListTripPlanItemReplacementCandidatesInputSchema: z.ZodType<
+  ListTripPlanItemReplacementCandidatesInput,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    sourceVersion: positiveSafeIntegerSchema,
+    dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
+    itemId: z.string().uuid(),
+    page: positiveSafeIntegerSchema.optional(),
+    pageSize: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_ITEM_REPLACEMENT_CANDIDATES).optional(),
+  })
+  .strict();
+
+export const TripPlanItemReplacementCandidateSchema: z.ZodType<
+  TripPlanItemReplacementCandidate,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    place: PlaceSchema,
+    recommendationReason: createTrimmedRequiredStringSchema('recommendationReason', 1_000),
+    distanceMetersFromOriginal: z.number().finite().nonnegative().optional(),
+  })
+  .strict();
+
+/** Strict candidate response; candidate count is bounded to avoid untrusted payload growth. */
+export const TripPlanItemReplacementCandidateListSchema: z.ZodType<
+  TripPlanItemReplacementCandidateList,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    items: z
+      .array(TripPlanItemReplacementCandidateSchema)
+      .max(MAX_TRIP_PLAN_ITEM_REPLACEMENT_CANDIDATES),
+    pagination: PaginationMetaSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const ids = new Set<string>();
+    value.items.forEach((candidate, index) => {
+      if (ids.has(candidate.place.id)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['items', index, 'place', 'id'],
+          message: 'replacement candidate places must be unique',
+        });
+      }
+      ids.add(candidate.place.id);
+    });
+  });
+
+/** Strict request for replacing one item with a server-verified candidate place. */
+export const ReplaceTripPlanItemInputSchema: z.ZodType<
+  ReplaceTripPlanItemInput,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    sourceVersion: positiveSafeIntegerSchema,
+    dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
+    itemId: z.string().uuid(),
+    replacementPlaceId: z.string().uuid(),
+  })
+  .strict();
+
+/** Complete immutable ready result returned by POST .../replace-item. */
+export const ReplaceTripPlanItemResultSchema: z.ZodType<
+  ReplaceTripPlanItemResult,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    tripId: z.string().uuid(),
+    sourceVersion: positiveSafeIntegerSchema,
+    dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
+    itemId: z.string().uuid(),
+    version: positiveSafeIntegerSchema,
+    status: z.literal('ready'),
+    plan: TripPlanSchema,
+    summary: TripPlanVersionSummarySchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.version <= value.sourceVersion) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['version'],
+        message: 'replacement must create a strictly newer version',
+      });
+    }
+    if (value.summary.version !== value.version) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['version'],
+        message: 'version must match summary.version',
+      });
+    }
+    if (
+      value.summary.status !== 'ready' ||
+      value.summary.tripId !== value.tripId ||
+      value.plan.tripId !== value.tripId
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['tripId'],
+        message: 'replacement result trip ids and status must match',
+      });
+    }
+    if (
+      value.summary.generatedAt === undefined ||
+      value.plan.generatedAt !== value.summary.generatedAt
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan', 'generatedAt'],
+        message: 'replacement plan generatedAt must match summary.generatedAt',
+      });
+    }
+  });
+
+export const TripPlanItemReplacementCandidateListResultSchema =
+  TripPlanItemReplacementCandidateListSchema;
+export const TripPlanItemReplacementInputSchema = ReplaceTripPlanItemInputSchema;
+export const TripPlanItemReplacementResultSchema = ReplaceTripPlanItemResultSchema;
 
 /** Strict, normalized request body for POST /trips/:id/regenerate-day. */
 export const RegenerateTripPlanDayInputSchema: z.ZodType<
