@@ -8,12 +8,50 @@
   <view wx:if="{{allVersions.length}}" class="version-card">
     <text class="section-title">历史版本</text>
     <view wx:for="{{allVersions}}" wx:key="value" class="version-status-row">
-      <text>{{item.label}}</text><text class="version-status">{{item.statusLabel}}</text>
+      <view class="version-row-main"><text>{{item.label}}</text><text class="version-status">{{item.statusLabel}}</text></view>
+      <button
+        wx:if="{{item.status === 'ready' && item.value != selectedVersion}}"
+        class="restore-button"
+        size="mini"
+        data-version="{{item.value}}"
+        bindtap="onRestoreVersion"
+        loading="{{restoringVersion == item.value}}"
+        disabled="{{restoringVersion !== undefined}}"
+      >恢复此版本</button>
     </view>
     <picker wx:if="{{readyVersions.length > 1}}" mode="selector" range="{{readyVersionLabels}}" value="{{versionPickerIndex}}" bindchange="onVersionChange" disabled="{{isSwitching}}">
       <view class="version-picker">切换可查看版本<text class="chevron">⌄</text></view>
     </picker>
     <text wx:if="{{isSwitching}}" class="switching">正在切换版本…</text>
+  </view>
+
+  <view wx:if="{{readyVersions.length > 1}}" class="diff-card">
+    <text class="section-title">版本差异</text>
+    <view class="diff-picker-row">
+      <picker mode="selector" range="{{diffVersionLabels}}" value="{{diffFromPickerIndex}}" bindchange="onDiffFromChange" disabled="{{isDiffLoading}}">
+        <view class="diff-picker">对比前：{{diffVersionLabels[diffFromPickerIndex]}}<text class="chevron">⌄</text></view>
+      </picker>
+      <picker mode="selector" range="{{diffVersionLabels}}" value="{{diffToPickerIndex}}" bindchange="onDiffToChange" disabled="{{isDiffLoading}}">
+        <view class="diff-picker">对比后：{{diffVersionLabels[diffToPickerIndex]}}<text class="chevron">⌄</text></view>
+      </picker>
+    </view>
+    <button class="diff-button" size="mini" bindtap="onCompareVersions" loading="{{isDiffLoading}}" disabled="{{isDiffLoading}}">查看差异</button>
+    <view wx:if="{{diff}}" class="diff-result">
+      <text wx:if="{{!diff.hasChanges}}" class="muted">两个版本没有业务内容变化。</text>
+      <view wx:for="{{diff.dayChanges}}" wx:key="dayNumber" class="diff-day">
+        <text class="block-label">{{item.dayNumber === 0 ? '全局内容' : '第 ' + item.dayNumber + ' 天'}}</text>
+        <view wx:for="{{item.changedFields}}" wx:key="*this" class="diff-field"><text>字段变化：{{item}}</text></view>
+        <view wx:for="{{item.itemChanges}}" wx:key="itemId" class="diff-item">
+          <text>{{item.changeType === 'added' ? '新增' : item.changeType === 'removed' ? '删除' : '修改'}}行程 {{item.itemId}}</text>
+          <view wx:for="{{item.changedFields}}" wx:key="*this" class="diff-field"><text>· {{item}}</text></view>
+        </view>
+      </view>
+      <view wx:if="{{diff.budgetDiff}}" class="diff-budget">
+        <text class="block-label">预算：¥{{diff.budgetDiff.beforeTotalCny}} → ¥{{diff.budgetDiff.afterTotalCny}}</text>
+        <view wx:for="{{diff.budgetDiff.changedFields}}" wx:key="*this" class="diff-field"><text>· {{item}}</text></view>
+      </view>
+    </view>
+    <text wx:if="{{isDiffLoading}}" class="switching">正在读取差异…</text>
   </view>
 
   <block wx:if="{{plan}}">

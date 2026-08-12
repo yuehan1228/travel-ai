@@ -6,6 +6,10 @@ import {
   PlaceListResultSchema,
   RegenerateTripPlanDayInputSchema,
   RegenerateTripPlanDayResultSchema,
+  RestoreTripPlanVersionInputSchema,
+  RestoreTripPlanVersionResultSchema,
+  TripPlanVersionDiffInputSchema,
+  TripPlanVersionDiffResultSchema,
   TripIdSchema,
   TripPlanGenerationResultSchema,
   TripPlanSchema,
@@ -21,6 +25,10 @@ import type {
   GenerateTripPlanInput,
   RegenerateTripPlanDayInput,
   RegenerateTripPlanDayResult,
+  RestoreTripPlanVersionInput,
+  RestoreTripPlanVersionResult,
+  TripPlanVersionDiffInput,
+  TripPlanVersionDiffResult,
   PlaceCategory,
   PlaceListResult,
   SearchPlacesInput,
@@ -44,6 +52,11 @@ import type { TripPlanGenerationContext } from './trip-plan-generation.types';
 import { TripPlanDayRegenerationContextSchema } from './trip-plan-day-regeneration.schema';
 import type { TripPlanDayRegenerationContext } from './trip-plan-day-regeneration.types';
 import { TripPlanGenerationService } from './trip-plan-generation.service';
+import {
+  compareTripPlanVersions,
+  TripPlanDiffValidationError,
+  withTripPlanVersionDiffVersions,
+} from './trip-plan-diff';
 import { TRIP_PLAN_CLOCK, TRIP_PLAN_REPOSITORY } from './trip-plan.tokens';
 import { systemTripPlanClock, type TripPlanClock } from './trip-plan.clock';
 import {
@@ -51,6 +64,7 @@ import {
   type TripPlanGenerationReservation,
   type TripPlanRepository,
   type TripPlanVersionRecord,
+  type TripPlanRestoreReservationResult,
 } from './repositories/trip-plan.repository';
 
 export interface TripPlanGenerator {
@@ -495,6 +509,200 @@ export class TripPlanService {
     }
   }
 
+  /** Compare two ready immutable snapshots without invoking any provider. */
+  public async diff(
+    userId: string,
+    tripId: string,
+    input: TripPlanVersionDiffInput,
+  ): Promise<TripPlanVersionDiffResult> {
+    this.assertTripId(tripId);
+    const parsedInput = TripPlanVersionDiffInputSchema.safeParse(input);
+    if (!parsedInput.success) throw validationError();
+    await this.requireTripForVersionOperation(userId, tripId);
+
+    let fromRecord: TripPlanVersionRecord | undefined;
+    let toRecord: TripPlanVersionRecord | undefined;
+    try {
+      [fromRecord, toRecord] = await Promise.all([
+        this.repository.findVersionForUser(userId, tripId, parsedInput.data.fromVersion),
+        this.repository.findVersionForUser(userId, tripId, parsedInput.data.toVersion),
+      ]);
+    } catch {
+      throw persistenceError();
+    }
+    if (
+      fromRecord === undefined ||
+      toRecord === undefined ||
+      fromRecord.status !== 'ready' ||
+      toRecord.status !== 'ready' ||
+      fromRecord.plan === undefined ||
+      toRecord.plan === undefined
+    ) {
+      throw planNotFoundError();
+    }
+
+    const fromPlan = TripPlanSchema.safeParse(fromRecord.plan);
+    const toPlan = TripPlanSchema.safeParse(toRecord.plan);
+    if (!fromPlan.success || !toPlan.success) throw planNotFoundError();
+    if (fromPlan.data.tripId !== tripId || toPlan.data.tripId !== tripId) {
+      throw persistenceError();
+    }
+
+    let result: TripPlanVersionDiffResult;
+    try {
+      result = withTripPlanVersionDiffVersions(
+        compareTripPlanVersions(fromPlan.data, toPlan.data),
+        parsedInput.data,
+      );
+    } catch (error: unknown) {
+      if (error instanceof TripPlanDiffValidationError) throw validationError();
+      throw persistenceError();
+    }
+    const validated = TripPlanVersionDiffResultSchema.safeParse(result);
+    if (!validated.success) throw persistenceError();
+    return validated.data;
+  }
+
+  public compareVersions(
+    userId: string,
+    tripId: string,
+    input: TripPlanVersionDiffInput,
+  ): Promise<TripPlanVersionDiffResult> {
+    return this.diff(userId, tripId, input);
+  }
+
+  /** Restore a ready source snapshot into a new immutable version. */
+  public restore(
+    userId: string,
+    tripId: string,
+    sourceVersion: number,
+    input?: RestoreTripPlanVersionInput,
+  ): Promise<RestoreTripPlanVersionResult>;
+  public restore(
+    userId: string,
+    tripId: string,
+    input: RestoreTripPlanVersionInput,
+    sourceVersion: number,
+  ): Promise<RestoreTripPlanVersionResult>;
+  public async restore(
+    userId: string,
+    tripId: string,
+    inputOrSourceVersion: RestoreTripPlanVersionInput | number,
+    sourceVersionOrInput?: RestoreTripPlanVersionInput | number,
+  ): Promise<RestoreTripPlanVersionResult> {
+    this.assertTripId(tripId);
+    const sourceVersion =
+      typeof inputOrSourceVersion === 'number'
+        ? inputOrSourceVersion
+        : typeof sourceVersionOrInput === 'number'
+          ? sourceVersionOrInput
+          : undefined;
+    const input: RestoreTripPlanVersionInput =
+      typeof inputOrSourceVersion === 'number'
+        ? typeof sourceVersionOrInput === 'object' && sourceVersionOrInput !== null
+          ? sourceVersionOrInput
+          : {}
+        : inputOrSourceVersion;
+    const parsedInput = RestoreTripPlanVersionInputSchema.safeParse(input);
+    if (!parsedInput.success) throw validationError();
+    if (
+      sourceVersion === undefined ||
+      !Number.isSafeInteger(sourceVersion) ||
+      sourceVersion < 1 ||
+      sourceVersion > 2_147_483_647
+    ) {
+      throw validationError();
+    }
+    const now = this.clock.now();
+    if (Number.isNaN(now.getTime())) throw validationError();
+
+    const trip = await this.requireTripForVersionOperation(userId, tripId);
+    let sourceRecord: TripPlanVersionRecord | undefined;
+    try {
+      sourceRecord = await this.repository.findVersionForUser(userId, tripId, sourceVersion);
+    } catch {
+      throw persistenceError();
+    }
+    if (
+      sourceRecord === undefined ||
+      sourceRecord.status !== 'ready' ||
+      sourceRecord.plan === undefined
+    ) {
+      throw planNotFoundError();
+    }
+    const sourcePlan = TripPlanSchema.safeParse(sourceRecord.plan);
+    if (!sourcePlan.success) throw planNotFoundError();
+    if (sourcePlan.data.tripId !== tripId) throw persistenceError();
+
+    let reserved: TripPlanRestoreReservationResult;
+    try {
+      if (this.repository.reserveRestore !== undefined) {
+        reserved = await this.repository.reserveRestore(userId, tripId, sourceVersion, now);
+      } else {
+        const fallback = await this.repository.reserveGeneration(userId, tripId, now);
+        reserved =
+          fallback.status === 'reserved'
+            ? {
+                status: 'reserved',
+                reservation: {
+                  ...fallback.reservation,
+                  operation: 'restore' as const,
+                  sourceVersion,
+                  previousTripStatus: fallback.reservation.previousTripStatus ?? trip.status,
+                },
+              }
+            : fallback.status === 'in_progress'
+              ? { status: 'in_progress' }
+              : { status: 'not_found' };
+      }
+    } catch {
+      throw persistenceError();
+    }
+    if (reserved.status === 'not_found') throw tripNotFoundError();
+    if (reserved.status === 'in_progress') throw inProgressError();
+    if (reserved.status === 'source_not_ready') throw planNotFoundError();
+    const reservation: TripPlanGenerationReservation = {
+      ...reserved.reservation,
+      operation: 'restore',
+      sourceVersion,
+      previousTripStatus: reserved.reservation.previousTripStatus ?? trip.status,
+    };
+
+    try {
+      const restoredPlan = TripPlanSchema.parse({
+        ...sourcePlan.data,
+        generatedAt: now.toISOString(),
+      });
+      let saved: TripPlanVersionRecord;
+      try {
+        saved = await this.repository.saveReady(userId, tripId, reservation, restoredPlan, now);
+      } catch {
+        throw persistenceError();
+      }
+      const result: RestoreTripPlanVersionResult = {
+        tripId,
+        sourceVersion,
+        version: saved.version,
+        status: 'ready',
+        plan: restoredPlan,
+        summary: tripPlanVersionSummary(saved),
+      };
+      const validated = RestoreTripPlanVersionResultSchema.safeParse(result);
+      if (!validated.success) throw persistenceError();
+      return validated.data;
+    } catch (error: unknown) {
+      const mapped = error instanceof TripPlanException ? error : persistenceError();
+      try {
+        const failedAt = this.clock.now();
+        if (Number.isNaN(failedAt.getTime())) throw persistenceError();
+        await this.repository.markFailed(userId, tripId, reservation, failedAt);
+      } catch {
+        throw persistenceError();
+      }
+      throw mapped;
+    }
+  }
+
   public async getLatest(userId: string, tripId: string): Promise<TripPlanVersionListResult> {
     this.assertTripId(tripId);
     await this.requireTrip(userId, tripId);
@@ -581,10 +789,50 @@ export class TripPlanService {
     return this.getVersion(userId, tripId, version);
   }
 
+  public getTripPlanDiff(
+    userId: string,
+    tripId: string,
+    input: TripPlanVersionDiffInput,
+  ): Promise<TripPlanVersionDiffResult> {
+    return this.diff(userId, tripId, input);
+  }
+
+  public restoreTripPlanVersion(
+    userId: string,
+    tripId: string,
+    sourceVersion: number,
+    input: RestoreTripPlanVersionInput = {},
+  ): Promise<RestoreTripPlanVersionResult> {
+    return this.restore(userId, tripId, input, sourceVersion);
+  }
+
+  public restoreVersion(
+    userId: string,
+    tripId: string,
+    sourceVersion: number,
+    input: RestoreTripPlanVersionInput = {},
+  ): Promise<RestoreTripPlanVersionResult> {
+    return this.restoreTripPlanVersion(userId, tripId, sourceVersion, input);
+  }
+
   private async requireTrip(userId: string, tripId: string): Promise<TripRecord> {
     try {
       const trip = await this.tripRepository.findByIdForUser(userId, tripId);
       if (trip === undefined) throw planNotFoundError();
+      return trip;
+    } catch (error: unknown) {
+      if (error instanceof TripPlanException) throw error;
+      throw persistenceError();
+    }
+  }
+
+  private async requireTripForVersionOperation(
+    userId: string,
+    tripId: string,
+  ): Promise<TripRecord> {
+    try {
+      const trip = await this.tripRepository.findByIdForUser(userId, tripId);
+      if (trip === undefined) throw tripNotFoundError();
       return trip;
     } catch (error: unknown) {
       if (error instanceof TripPlanException) throw error;

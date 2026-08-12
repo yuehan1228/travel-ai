@@ -5,10 +5,14 @@ import type { TripPlan } from '@travel-guide/shared-types';
 import { RequestError } from '../services/request-error';
 import {
   applyLatestTripPlanResult,
+  applyTripPlanDiffResult,
+  applyTripPlanVersionRestoreResult,
   applyTripPlanDayRegenerationResult,
   applyTripPlanViewError,
   applyTripPlanVersionResult,
   beginTripPlanDayRegeneration,
+  beginTripPlanDiff,
+  beginTripPlanVersionRestore,
   createTripPlanDisplayModel,
   createTripPlanViewState,
   createTripPlanViewStateRegistry,
@@ -200,6 +204,43 @@ describe('TripPlan view adapters', () => {
     expect(switched.selectedVersion).toBe(2);
     expect(switched.regeneratingDay).toBeUndefined();
     expect(switched.readyVersions[0]?.version).toBe(2);
+  });
+
+  it('single-flights diff and restore while preserving the displayed plan on failure', () => {
+    const state = applyLatestTripPlanResult(createTripPlanViewState(tripId), {
+      items: [
+        readySummary,
+        { ...readySummary, version: 2, id: '323e4567-e89b-12d3-a456-426614174000' },
+      ],
+      latestVersion: 2,
+      plan,
+    });
+    const diffLoading = beginTripPlanDiff(state, 1, 2);
+    expect(diffLoading.isDiffLoading).toBe(true);
+    expect(beginTripPlanDiff(diffLoading, 1, 2)).toBe(diffLoading);
+    const compared = applyTripPlanDiffResult(diffLoading, {
+      tripId,
+      fromVersion: 1,
+      toVersion: 2,
+      dayChanges: [],
+      hasChanges: false,
+    });
+    expect(compared.diff?.hasChanges).toBe(false);
+
+    const restoring = beginTripPlanVersionRestore(compared, 1);
+    expect(restoring.restoringVersion).toBe(1);
+    expect(beginTripPlanVersionRestore(restoring, 2)).toBe(restoring);
+    const restored = applyTripPlanVersionRestoreResult(restoring, {
+      tripId,
+      sourceVersion: 1,
+      version: 3,
+      status: 'ready',
+      plan,
+      summary: { ...readySummary, version: 3, id: '423e4567-e89b-12d3-a456-426614174000' },
+    });
+    expect(restored.selectedVersion).toBe(3);
+    expect(restored.restoringVersion).toBeUndefined();
+    expect(applyTripPlanViewError(restored, '恢复失败').plan).toEqual(plan);
   });
 
   it('renders all days and exposes generated metadata in the display model', () => {

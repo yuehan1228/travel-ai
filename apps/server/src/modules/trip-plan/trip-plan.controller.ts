@@ -7,6 +7,7 @@ import {
   Inject,
   Param,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -16,8 +17,12 @@ import {
   GenerateTripPlanInputSchema,
   RegenerateTripPlanDayInputSchema,
   RegenerateTripPlanDayResultSchema,
+  RestoreTripPlanVersionInputSchema,
+  RestoreTripPlanVersionResultSchema,
   TripIdSchema,
   TripPlanGenerationResultSchema,
+  TripPlanVersionDiffInputSchema,
+  TripPlanVersionDiffResultSchema,
   TripPlanVersionListResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
@@ -25,6 +30,10 @@ import type {
   GenerateTripPlanInput,
   RegenerateTripPlanDayInput,
   RegenerateTripPlanDayResult,
+  RestoreTripPlanVersionInput,
+  RestoreTripPlanVersionResult,
+  TripPlanVersionDiffInput,
+  TripPlanVersionDiffResult,
   TripPlanGenerationResult,
   TripPlanVersionListResult,
 } from '@travel-guide/shared-types';
@@ -53,6 +62,29 @@ const parseVersion = (value: string): number => {
     throw validationError();
   }
   return parsed;
+};
+
+const parseDiffQuery = (query: unknown): TripPlanVersionDiffInput => {
+  if (typeof query !== 'object' || query === null || Array.isArray(query)) {
+    throw validationError();
+  }
+  const value = query as Record<string, unknown>;
+  const keys = Object.keys(value).sort();
+  if (keys.length !== 2 || keys[0] !== 'fromVersion' || keys[1] !== 'toVersion') {
+    throw validationError();
+  }
+  const parseQueryVersion = (raw: unknown): number | undefined => {
+    if (typeof raw === 'number') return raw;
+    if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return undefined;
+    const parsed = Number(raw);
+    return Number.isSafeInteger(parsed) ? parsed : undefined;
+  };
+  const parsed = TripPlanVersionDiffInputSchema.safeParse({
+    fromVersion: parseQueryVersion(value.fromVersion),
+    toVersion: parseQueryVersion(value.toVersion),
+  });
+  if (!parsed.success) throw validationError();
+  return parsed.data;
 };
 
 @Controller('trips')
@@ -93,6 +125,56 @@ export class TripPlanController {
     if (!parsedBody.success) throw validationError();
     const result = await this.service.regenerateDay(userId, parseTripId(tripId), parsedBody.data);
     const validated = RegenerateTripPlanDayResultSchema.safeParse(result);
+    if (!validated.success)
+      throw new TripPlanException(
+        'TRIP_PLAN_PERSISTENCE_ERROR',
+        500,
+        'TripPlan data could not be persisted',
+      );
+    return { success: true, data: validated.data, requestId: requestIdFor(request) };
+  }
+
+  @Get(':id/plan/diff')
+  @HttpCode(HttpStatus.OK)
+  public async diff(
+    @Param('id') tripId: string,
+    @Query() query: unknown,
+    @CurrentUserId() userId: string,
+    @Req() request: FastifyRequest,
+  ): Promise<ApiSuccess<TripPlanVersionDiffResult>> {
+    const result = await this.service.getTripPlanDiff(
+      userId,
+      parseTripId(tripId),
+      parseDiffQuery(query),
+    );
+    const validated = TripPlanVersionDiffResultSchema.safeParse(result);
+    if (!validated.success)
+      throw new TripPlanException(
+        'TRIP_PLAN_PERSISTENCE_ERROR',
+        500,
+        'TripPlan data could not be persisted',
+      );
+    return { success: true, data: validated.data, requestId: requestIdFor(request) };
+  }
+
+  @Post(':id/plan/:version/restore')
+  @HttpCode(HttpStatus.OK)
+  public async restore(
+    @Param('id') tripId: string,
+    @Param('version') version: string,
+    @Body() body: unknown,
+    @CurrentUserId() userId: string,
+    @Req() request: FastifyRequest,
+  ): Promise<ApiSuccess<RestoreTripPlanVersionResult>> {
+    const parsedBody = RestoreTripPlanVersionInputSchema.safeParse(body);
+    if (!parsedBody.success) throw validationError();
+    const result = await this.service.restoreTripPlanVersion(
+      userId,
+      parseTripId(tripId),
+      parseVersion(version),
+      parsedBody.data,
+    );
+    const validated = RestoreTripPlanVersionResultSchema.safeParse(result);
     if (!validated.success)
       throw new TripPlanException(
         'TRIP_PLAN_PERSISTENCE_ERROR',
@@ -144,4 +226,9 @@ export class TripPlanController {
   }
 }
 
-export type { GenerateTripPlanInput, RegenerateTripPlanDayInput };
+export type {
+  GenerateTripPlanInput,
+  RegenerateTripPlanDayInput,
+  RestoreTripPlanVersionInput,
+  TripPlanVersionDiffInput,
+};

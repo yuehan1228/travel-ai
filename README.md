@@ -140,6 +140,17 @@ Trip/版本使用统一的脱敏错误。稳定错误包括 `TRIP_NOT_FOUND`、`
 单日重生成与整单生成共享 Trip 行级原子状态和版本号 reservation，同一旅行需求同时只能有一个操作。成功在事务中保存完整新快照并递增版本；失败只保留 `failed` 元数据并恢复原有 `ready` 状态，旧版本及其日/条目快照不可变。
 跨用户或不存在的 Trip 统一返回 `TRIP_NOT_FOUND`，其他稳定 TripPlan 错误码沿用生成 API。小程序 `TripPlanService.regenerateTripPlanDay` 和只读详情页的每日按钮支持可选 instruction、单飞 loading、失败重试；成功切换到新版本，失败保留旧攻略，认证失效时清理 Token。仍不引入 Redis、队列、攻略编辑或实时协作。
 
+### TripPlan 版本差异与恢复（TASK-020）
+
+详情接口 `GET /trips/:id/plan/diff?fromVersion=1&toVersion=2` 只比较同一用户拥有的两个 `ready` 版本。比较按 `dayNumber` 和稳定的
+`item.id` 匹配，完整检查天气、地点、路线、提醒、费用、建议和预算字段；`generatedAt` 只是生成元数据，单独变化不会形成业务差异。
+差异输出按日号、条目 ID 和字段名排序，超过共享上限时返回稳定验证错误，不静默截断。
+
+`POST /trips/:id/plan/:version/restore` 不接受客户端 Plan，恢复目标快照经 Schema 重新校验后复制到一个新的递增不可变版本，并更新
+`generatedAt`。版本、日、条目和 Trip 状态在同一事务中保存；失败只留下失败元数据并恢复操作前的 `ready` 状态，历史版本不会被覆盖。
+整单生成、单日重生成和恢复共用 Trip 行级原子 `generating` reservation，仍不使用 LLM、Redis、队列或后台任务。小程序详情页提供两个 ready
+版本的普通文本差异查看和历史版本恢复入口，恢复加载或失败时保留当前攻略，认证失效仍由 `AuthService` 清理 Token。
+
 访问顺序建议使用需要认证的 `POST /routes/order`，在真实路线矩阵上运行确定性的最近邻（nearest-neighbor）贪心算法。
 请求可指定 `startId` 和 `endId`；未指定起点时按点 ID 字典序选择，候选路线按预计耗时、距离和目标 ID 依次打破平局，
 并将指定终点保留到最后。不可用的两点路线不会参与候选；若无法覆盖全部点则返回 `ROUTE_ORDER_UNAVAILABLE`。结果明确标记

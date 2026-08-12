@@ -202,6 +202,21 @@ unavailable 路线作为交通耗时都会稳定失败。`climate_reference` 天
 
 小程序详情页为每个 ready 日提供普通文本 instruction 输入和“重新生成本日”按钮；状态由单飞 guard 控制，成功切换到返回的新版本，失败保留旧快照并允许重试，`AUTH_TOKEN_INVALID` 仍由 `AuthService` 清理认证状态。该能力不引入 Redis、队列、编辑 API、地图或实时协作。
 
+### TripPlan 版本差异与不可变恢复（TASK-020）
+
+`GET /trips/:id/plan/diff` 接受两个不同的正安全整数版本，仅允许比较当前用户的同一 Trip 下的 `ready` 快照。纯比较函数按 `dayNumber`
+和稳定 `item.id` 匹配，完整比较每日摘要、天气、地点、路线、提醒、费用、住宿/餐饮建议、交通/通用提示和分类/总预算；对象值使用确定性
+键序比较，输出按日号、条目 ID、字段名排序。`generatedAt` 不属于业务内容，单独更新时间不会产生差异；差异超过共享上限时返回验证错误，绝不静默
+截断。
+
+`POST /trips/:id/plan/:version/restore` 只接受空对象，目标必须是当前用户的 `ready` 版本。恢复在同一 Trip 事务中预留新版本并物化完整日/条目行，
+复制源快照且更新 `generatedAt`，成功后 Trip 为 `ready`；历史版本保持不可变。整单生成、单日重生成和恢复共享同一个原子 `generating`
+reservation（`operation` 分别为 `generate`、`regenerate-day`、`restore`），并发请求统一返回进行中错误；失败只保存 `failed` 元数据并恢复操作前的
+`ready` 状态。服务不调用 LLM、天气、POI 或路线 Provider，且不引入 Redis、队列、聊天、地图、分享和协作能力。
+
+小程序详情页只用原生 `text/view` 展示两个 ready 版本之间的结构化差异，并为非当前版本提供恢复按钮；恢复采用单飞 loading，成功切换到新版本，失败
+保留当前快照，`AUTH_TOKEN_INVALID` 继续通过 `AuthService` 清理认证状态。
+
 ### 小程序 TripPlan 生成流程与只读详情（TASK-018）
 
 首页提交由轻量表单状态转换为严格 `CreateTripInputSchema` 输入，先检查 `AuthService` 登录状态，再保存本地草稿并调用

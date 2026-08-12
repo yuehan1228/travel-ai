@@ -184,6 +184,8 @@ const trip = (tripInput: CreateTripInput = input): TripRecord => ({
 
 class FakeRepository implements TripPlanRepository {
   public busy = false;
+  public failSave = false;
+  public lastReservation: TripPlanGenerationReservation | undefined;
   public readonly sourceInput: CreateTripInput;
   public readonly sourcePlan: TripPlan;
   public readonly records: TripPlanVersionRecord[];
@@ -276,6 +278,8 @@ class FakeRepository implements TripPlanRepository {
     nextPlan: TripPlan,
     readyAt: Date,
   ): Promise<TripPlanVersionRecord> {
+    this.lastReservation = reservation;
+    if (this.failSave) throw new Error('transaction failed');
     const index = this.records.findIndex((record) => record.id === reservation.versionId);
     if (index < 0) throw new Error('missing reservation');
     const ready: TripPlanVersionRecord = {
@@ -510,6 +514,69 @@ describe('TripPlan day regeneration', () => {
     await expect(
       repository.reserveDayRegeneration(userId, tripId, 1, 1, undefined, new Date(generatedAt)),
     ).resolves.toEqual({ status: 'in_progress' });
+  });
+
+  it('restores an immutable source as a new version without invoking the LLM or context readers', async () => {
+    const repository = new FakeRepository();
+    const llm = new FakeLLMProvider(() => {
+      throw new Error('restore must not invoke LLM');
+    });
+    const service = createService(llm, repository);
+    const source = repository.records[0]?.plan;
+    const result = await service.restoreTripPlanVersion(userId, tripId, 1);
+
+    expect(result).toMatchObject({ sourceVersion: 1, version: 2, status: 'ready' });
+    expect(result.plan).toEqual(source);
+    expect(repository.lastReservation?.operation).toBe('restore');
+    expect(repository.records[0]?.plan).toEqual(source);
+    expect(repository.records[0]?.status).toBe('ready');
+    expect(repository.records[1]?.plan).toEqual(source);
+    expect(repository.records[1]?.status).toBe('ready');
+    expect(llm.calls).toBe(0);
+  });
+
+  it('marks a failed restore version while preserving the old ready snapshot', async () => {
+    const repository = new FakeRepository();
+    repository.failSave = true;
+    const service = createService(new FakeLLMProvider(() => day('不会调用')), repository);
+    const source = repository.records[0]?.plan;
+
+    await expect(service.restoreTripPlanVersion(userId, tripId, 1)).rejects.toMatchObject({
+      code: 'TRIP_PLAN_PERSISTENCE_ERROR',
+    });
+    expect(repository.records[0]?.status).toBe('failed');
+    expect(repository.records[1]?.status).toBe('ready');
+    expect(repository.records[1]?.plan).toEqual(source);
+  });
+
+  it('rejects a corrupted source snapshot before reserving a restore version', async () => {
+    const repository = new FakeRepository();
+    const source = repository.records[0]!;
+    repository.records[0] = {
+      ...source,
+      plan: { ...source.plan!, tripId: '723e4567-e89b-12d3-a456-426614174000' },
+    };
+    const service = createService(new FakeLLMProvider(() => day('不会调用')), repository);
+
+    await expect(service.restoreTripPlanVersion(userId, tripId, 1)).rejects.toMatchObject({
+      code: 'TRIP_PLAN_PERSISTENCE_ERROR',
+    });
+    expect(repository.records).toHaveLength(1);
+    expect(repository.records[0]?.status).toBe('ready');
+    expect(repository.lastReservation).toBeUndefined();
+    expect(repository.busy).toBe(false);
+  });
+
+  it('shares the in-progress reservation with restore and does not call providers', async () => {
+    const repository = new FakeRepository();
+    repository.busy = true;
+    const llm = new FakeLLMProvider(() => day('不会调用'));
+    const service = createService(llm, repository);
+
+    await expect(service.restoreTripPlanVersion(userId, tripId, 1)).rejects.toMatchObject({
+      code: 'TRIP_PLAN_GENERATION_IN_PROGRESS',
+    });
+    expect(llm.calls).toBe(0);
   });
 
   it('does not reveal a cross-user Trip', async () => {

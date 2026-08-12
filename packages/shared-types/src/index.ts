@@ -6,3 +6,4 @@ export * from './weather';
 export * from './place';
 export * from './route';
 export * from './trip-plan';
+export * from './trip-plan-diff';

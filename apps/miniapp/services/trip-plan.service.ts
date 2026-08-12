@@ -2,15 +2,22 @@ import {
   GenerateTripPlanInputSchema,
   RegenerateTripPlanDayInputSchema,
   RegenerateTripPlanDayResultSchema,
+  RestoreTripPlanVersionInputSchema,
+  RestoreTripPlanVersionResultSchema,
   TripIdSchema,
   TripPlanGenerationResultSchema,
+  TripPlanVersionDiffInputSchema,
+  TripPlanVersionDiffResultSchema,
   TripPlanVersionListResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
   GenerateTripPlanInput,
   RegenerateTripPlanDayInput,
   RegenerateTripPlanDayResult,
+  RestoreTripPlanVersionInput,
+  RestoreTripPlanVersionResult,
   TripPlanGenerationResult,
+  TripPlanVersionDiffResult,
   TripPlanVersionListResult,
 } from '@travel-guide/shared-types';
 
@@ -63,6 +70,36 @@ export class TripPlanService {
       method: 'GET',
       path: `/trips/${encodeURIComponent(tripId)}/plan/${parsedVersion}`,
       schema: TripPlanGenerationResultSchema,
+    });
+  }
+
+  public async getTripPlanDiff(
+    id: string,
+    fromVersion: number,
+    toVersion: number,
+  ): Promise<TripPlanVersionDiffResult> {
+    const tripId = TripIdSchema.parse(id);
+    const parsedInput = TripPlanVersionDiffInputSchema.parse({ fromVersion, toVersion });
+    return this.request<TripPlanVersionDiffResult>({
+      method: 'GET',
+      path: `/trips/${encodeURIComponent(tripId)}/plan/diff?fromVersion=${parsedInput.fromVersion}&toVersion=${parsedInput.toVersion}`,
+      schema: TripPlanVersionDiffResultSchema,
+    });
+  }
+
+  public async restoreTripPlanVersion(
+    id: string,
+    version: number,
+    input: RestoreTripPlanVersionInput = {},
+  ): Promise<RestoreTripPlanVersionResult> {
+    const tripId = TripIdSchema.parse(id);
+    const parsedVersion = parseVersion(version);
+    const parsedInput = RestoreTripPlanVersionInputSchema.parse(input);
+    return this.request<RestoreTripPlanVersionResult>({
+      method: 'POST',
+      path: `/trips/${encodeURIComponent(tripId)}/plan/${parsedVersion}/restore`,
+      data: parsedInput,
+      schema: RestoreTripPlanVersionResultSchema,
     });
   }
 

@@ -2,7 +2,9 @@ import {
   TripIdSchema,
   TripPlanGenerationResultSchema,
   RegenerateTripPlanDayResultSchema,
+  RestoreTripPlanVersionResultSchema,
   TripPlanSchema,
+  TripPlanVersionDiffResultSchema,
   TripPlanVersionListResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
@@ -14,10 +16,12 @@ import type {
   TripPlan,
   TripPlanGenerationResult,
   RegenerateTripPlanDayResult,
+  RestoreTripPlanVersionResult,
   TripPlanItem,
   TripPlanItemType,
   TripPlanVersionListResult,
   TripPlanVersionSummary,
+  TripPlanVersionDiffResult,
 } from '@travel-guide/shared-types';
 import { z } from 'zod';
 
@@ -104,6 +108,11 @@ export interface TripPlanViewState {
   readonly isSwitching: boolean;
   readonly regeneratingDay?: number;
   readonly errorMessage: string;
+  readonly diff?: TripPlanVersionDiffResult;
+  readonly diffFromVersion?: number;
+  readonly diffToVersion?: number;
+  readonly isDiffLoading: boolean;
+  readonly restoringVersion?: number;
 }
 
 export interface TripPlanViewStateRegistry<TPage extends object> {
@@ -135,6 +144,8 @@ export const createTripPlanViewState = (tripId: string): TripPlanViewState => ({
   isSwitching: false,
   regeneratingDay: undefined,
   errorMessage: '',
+  isDiffLoading: false,
+  restoringVersion: undefined,
 });
 
 export const getVisibleTripPlanVersions = (
@@ -180,12 +191,26 @@ export const parseTripPlanDayRegenerationResult = (value: unknown): RegenerateTr
   return parsed.data;
 };
 
+export const parseTripPlanDiffResult = (value: unknown): TripPlanVersionDiffResult => {
+  const parsed = TripPlanVersionDiffResultSchema.safeParse(value);
+  if (!parsed.success) throw invalidTripPlanResponse();
+  return parsed.data;
+};
+
+export const parseTripPlanRestoreResult = (value: unknown): RestoreTripPlanVersionResult => {
+  const parsed = RestoreTripPlanVersionResultSchema.safeParse(value);
+  if (!parsed.success || parsed.data.status !== 'ready') throw invalidTripPlanResponse();
+  return parsed.data;
+};
+
 export const beginTripPlanLoad = (state: TripPlanViewState): TripPlanViewState => ({
   ...state,
   status: 'loading',
   isSwitching: false,
   regeneratingDay: undefined,
   errorMessage: '',
+  isDiffLoading: false,
+  restoringVersion: undefined,
 });
 
 export const beginTripPlanVersionSwitch = (state: TripPlanViewState): TripPlanViewState => ({
@@ -194,6 +219,91 @@ export const beginTripPlanVersionSwitch = (state: TripPlanViewState): TripPlanVi
   regeneratingDay: undefined,
   errorMessage: '',
 });
+
+export const beginTripPlanDiff = (
+  state: TripPlanViewState,
+  fromVersion: number,
+  toVersion: number,
+): TripPlanViewState => {
+  if (
+    state.isDiffLoading ||
+    state.isSwitching ||
+    state.restoringVersion !== undefined ||
+    !Number.isSafeInteger(fromVersion) ||
+    !Number.isSafeInteger(toVersion) ||
+    fromVersion < 1 ||
+    toVersion < 1 ||
+    fromVersion === toVersion
+  ) {
+    return state;
+  }
+  return {
+    ...state,
+    diffFromVersion: fromVersion,
+    diffToVersion: toVersion,
+    isDiffLoading: true,
+    errorMessage: '',
+  };
+};
+
+export const applyTripPlanDiffResult = (
+  state: TripPlanViewState,
+  result: TripPlanVersionDiffResult,
+): TripPlanViewState => {
+  const parsed = parseTripPlanDiffResult(result);
+  if (parsed.tripId !== state.tripId) throw invalidTripPlanResponse();
+  return {
+    ...state,
+    diff: parsed,
+    diffFromVersion: parsed.fromVersion,
+    diffToVersion: parsed.toVersion,
+    isDiffLoading: false,
+    errorMessage: '',
+  };
+};
+
+export const beginTripPlanVersionRestore = (
+  state: TripPlanViewState,
+  version: number,
+): TripPlanViewState => {
+  if (
+    state.restoringVersion !== undefined ||
+    !Number.isSafeInteger(version) ||
+    version < 1 ||
+    version === state.selectedVersion
+  ) {
+    return state;
+  }
+  return { ...state, restoringVersion: version, errorMessage: '' };
+};
+
+export const applyTripPlanVersionRestoreResult = (
+  state: TripPlanViewState,
+  result: RestoreTripPlanVersionResult,
+): TripPlanViewState => {
+  const parsed = parseTripPlanRestoreResult(result);
+  if (parsed.tripId !== state.tripId) throw invalidTripPlanResponse();
+  const allVersions = getVisibleTripPlanVersions([
+    parsed.summary,
+    ...state.allVersions.filter((item) => item.version !== parsed.version),
+  ]);
+  return {
+    ...state,
+    status: 'ready',
+    plan: parsed.plan,
+    allVersions,
+    readyVersions: getReadyTripPlanVersions(allVersions),
+    latestVersion: parsed.version,
+    selectedVersion: parsed.version,
+    isSwitching: false,
+    diff: undefined,
+    diffFromVersion: undefined,
+    diffToVersion: undefined,
+    isDiffLoading: false,
+    restoringVersion: undefined,
+    errorMessage: '',
+  };
+};
 
 export const beginTripPlanDayRegeneration = (
   state: TripPlanViewState,
@@ -228,7 +338,12 @@ export const applyLatestTripPlanResult = (
     selectedVersion: parsed.latestVersion,
     isSwitching: false,
     regeneratingDay: undefined,
+    diff: undefined,
+    diffFromVersion: undefined,
+    diffToVersion: undefined,
     errorMessage: hasPlan ? '' : '暂时没有可用攻略。',
+    isDiffLoading: false,
+    restoringVersion: undefined,
   };
 };
 
@@ -253,6 +368,10 @@ export const applyTripPlanVersionResult = (
     selectedVersion: parsed.version,
     isSwitching: false,
     regeneratingDay: undefined,
+    diff: undefined,
+    diffFromVersion: undefined,
+    diffToVersion: undefined,
+    isDiffLoading: false,
     errorMessage: '',
   };
 };
@@ -284,6 +403,10 @@ export const applyTripPlanDayRegenerationResult = (
     selectedVersion: parsed.version,
     isSwitching: false,
     regeneratingDay: undefined,
+    diff: undefined,
+    diffFromVersion: undefined,
+    diffToVersion: undefined,
+    isDiffLoading: false,
     errorMessage: '',
   };
 };
@@ -297,6 +420,8 @@ export const applyTripPlanViewError = (
   status: state.plan === undefined ? 'error' : 'ready',
   isSwitching: false,
   regeneratingDay: undefined,
+  isDiffLoading: false,
+  restoringVersion: undefined,
   errorMessage,
 });
 
@@ -321,6 +446,8 @@ export const getTripPlanUserMessage = (error: unknown): string => {
       return '该版本或日期不可用，请重新加载攻略。';
     case 'TRIP_PLAN_GENERATION_IN_PROGRESS':
       return '攻略正在生成中，请稍候再试。';
+    case 'TRIP_PLAN_DIFF_VALIDATION_ERROR':
+      return '版本差异请求无效，请重新选择版本。';
     case 'TRIP_PLAN_VALIDATION_ERROR':
       return '攻略请求无效，请检查旅行需求。';
     case 'TRIP_PLAN_UNAVAILABLE':

@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import type {
   GenerateTripPlanInput,
   RegenerateTripPlanDayResult,
+  RestoreTripPlanVersionResult,
   TripPlanGenerationResult,
+  TripPlanVersionDiffResult,
   TripPlanVersionListResult,
   TripPlanVersionSummary,
 } from '@travel-guide/shared-types';
@@ -79,6 +81,26 @@ const dayRegenerationResult: RegenerateTripPlanDayResult = {
   sourceVersion: 1,
   dayNumber: 1,
 };
+const diffResult: TripPlanVersionDiffResult = {
+  tripId,
+  fromVersion: 1,
+  toVersion: 2,
+  dayChanges: [],
+  hasChanges: false,
+};
+const restoredSummary: TripPlanVersionSummary = {
+  ...summary,
+  id: '323e4567-e89b-12d3-a456-426614174000',
+  version: 2,
+};
+const restoreResult: RestoreTripPlanVersionResult = {
+  tripId,
+  sourceVersion: 1,
+  version: 2,
+  status: 'ready',
+  plan,
+  summary: restoredSummary,
+};
 
 const createAuth = (token: string | undefined): TripPlanAuthService & { loggedOut: boolean } => {
   const auth = {
@@ -106,6 +128,8 @@ describe('miniapp TripPlanService', () => {
       { success: true, data: listResult, requestId: 'plan-2' },
       { success: true, data: generationResult, requestId: 'plan-3' },
       { success: true, data: dayRegenerationResult, requestId: 'plan-4' },
+      { success: true, data: diffResult, requestId: 'plan-5' },
+      { success: true, data: restoreResult, requestId: 'plan-6' },
     ];
     const service = new TripPlanService(
       createClient(async (options) => {
@@ -132,15 +156,20 @@ describe('miniapp TripPlanService', () => {
         instruction: '  更轻松  ',
       }),
     ).resolves.toEqual(dayRegenerationResult);
+    await expect(service.getTripPlanDiff(tripId, 1, 2)).resolves.toEqual(diffResult);
+    await expect(service.restoreTripPlanVersion(tripId, 1)).resolves.toEqual(restoreResult);
     expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
       'POST https://api.example.invalid/trips/123e4567-e89b-12d3-a456-426614174000/generate',
       'GET https://api.example.invalid/trips/123e4567-e89b-12d3-a456-426614174000/plan',
       'GET https://api.example.invalid/trips/123e4567-e89b-12d3-a456-426614174000/plan/1',
       'POST https://api.example.invalid/trips/123e4567-e89b-12d3-a456-426614174000/regenerate-day',
+      'GET https://api.example.invalid/trips/123e4567-e89b-12d3-a456-426614174000/plan/diff?fromVersion=1&toVersion=2',
+      'POST https://api.example.invalid/trips/123e4567-e89b-12d3-a456-426614174000/plan/1/restore',
     ]);
     expect(requests.every((request) => request.authorization === 'Bearer plan-token')).toBe(true);
     expect(requests[0]?.data).toEqual({});
     expect(requests[3]?.data).toEqual({ sourceVersion: 1, dayNumber: 1, instruction: '更轻松' });
+    expect(requests[5]?.data).toEqual({});
   });
 
   it('does not access network without a token and validates UUID/version locally', async () => {

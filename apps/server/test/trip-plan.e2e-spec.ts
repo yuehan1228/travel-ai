@@ -9,6 +9,8 @@ import {
   PlaceSchema,
   TripPlanGenerationResultSchema,
   RegenerateTripPlanDayResultSchema,
+  RestoreTripPlanVersionResultSchema,
+  TripPlanVersionDiffResultSchema,
   TripPlanSchema,
   TripPlanVersionListResultSchema,
 } from '@travel-guide/shared-schemas';
@@ -591,5 +593,53 @@ describe('TripPlan API boundary', () => {
       status: 'ready',
     });
     expect(envelope.data.plan?.days).toHaveLength(3);
+  });
+
+  it('compares ready versions and restores an immutable source without provider calls', async () => {
+    const token = await login();
+    const beforeLlm = llm.calls;
+    const beforeWeather = weatherProvider.calls;
+    const beforePlaces = placeProvider.calls;
+    const beforeRoutes = routeProvider.calls;
+    const diffResponse = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'GET',
+        url: `/trips/${validTripId}/plan/diff?fromVersion=1&toVersion=2`,
+        headers: { authorization: `Bearer ${token}`, 'x-request-id': 'trip-plan-diff-1' },
+      });
+    expect(diffResponse.statusCode).toBe(200);
+    expect(diffResponse.headers['x-request-id']).toBe('trip-plan-diff-1');
+    const diff = createApiSuccessSchema(TripPlanVersionDiffResultSchema).parse(
+      JSON.parse(diffResponse.payload),
+    );
+    expect(diff.data).toMatchObject({ tripId: validTripId, fromVersion: 1, toVersion: 2 });
+
+    const restoreResponse = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: `/trips/${validTripId}/plan/1/restore`,
+        headers: { authorization: `Bearer ${token}`, 'x-request-id': 'trip-plan-restore-1' },
+        payload: {},
+      });
+    expect(restoreResponse.statusCode).toBe(200);
+    expect(restoreResponse.headers['x-request-id']).toBe('trip-plan-restore-1');
+    const restored = createApiSuccessSchema(RestoreTripPlanVersionResultSchema).parse(
+      JSON.parse(restoreResponse.payload),
+    );
+    expect(restored.data).toMatchObject({
+      tripId: validTripId,
+      sourceVersion: 1,
+      version: 3,
+      status: 'ready',
+    });
+    expect(restored.data.plan).toEqual(validPlan());
+    expect(llm.calls).toBe(beforeLlm);
+    expect(weatherProvider.calls).toBe(beforeWeather);
+    expect(placeProvider.calls).toBe(beforePlaces);
+    expect(routeProvider.calls).toBe(beforeRoutes);
   });
 });

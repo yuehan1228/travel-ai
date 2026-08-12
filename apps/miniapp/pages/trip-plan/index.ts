@@ -1,17 +1,22 @@
 import type {
   RegenerateTripPlanDayInput,
   TripPlanVersionSummary,
+  TripPlanVersionDiffResult,
 } from '@travel-guide/shared-types';
 
 import { tripPlanService } from '../../services/trip-plan.service';
 import {
   applyLatestTripPlanResult,
   applyTripPlanDayRegenerationResult,
+  applyTripPlanDiffResult,
+  applyTripPlanVersionRestoreResult,
   applyTripPlanViewError,
   applyTripPlanVersionResult,
   beginTripPlanLoad,
   beginTripPlanDayRegeneration,
+  beginTripPlanDiff,
   beginTripPlanVersionSwitch,
+  beginTripPlanVersionRestore,
   createTripPlanDisplayModel,
   createTripPlanViewState,
   createTripPlanViewStateRegistry,
@@ -49,6 +54,14 @@ interface TripPlanPageData {
   selectedVersion?: number;
   regeneratingDay?: number;
   regenerateInstructions: Record<string, string>;
+  diff?: TripPlanVersionDiffResult;
+  diffFromVersion: number;
+  diffToVersion: number;
+  diffFromPickerIndex: number;
+  diffToPickerIndex: number;
+  diffVersionLabels: string[];
+  isDiffLoading: boolean;
+  restoringVersion?: number;
 }
 
 type TripPlanPageDisplayModel = Omit<TripPlanDisplayModel, 'days'> & {
@@ -120,6 +133,14 @@ const syncPage = (
     versionPickerIndex: selectedVersionIndex(readyVersions, state.selectedVersion),
     selectedVersion: state.selectedVersion,
     regeneratingDay: state.regeneratingDay,
+    diff: state.diff,
+    diffFromVersion: state.diffFromVersion ?? 0,
+    diffToVersion: state.diffToVersion ?? 0,
+    diffFromPickerIndex: selectedVersionIndex(readyVersions, state.diffFromVersion),
+    diffToPickerIndex: selectedVersionIndex(readyVersions, state.diffToVersion),
+    diffVersionLabels: readyVersions.map((item) => item.label),
+    isDiffLoading: state.isDiffLoading,
+    restoringVersion: state.restoringVersion,
   });
 };
 
@@ -240,6 +261,86 @@ const regenerateDay = async (
   }
 };
 
+const loadDiff = async (
+  page: PageInstance<TripPlanPageData>,
+  fromVersion: number,
+  toVersion: number,
+): Promise<void> => {
+  const current = getViewState(page);
+  if (
+    page.data.isDiffLoading ||
+    page.data.tripId.length === 0 ||
+    fromVersion === toVersion ||
+    !current.readyVersions.some((item) => item.version === fromVersion) ||
+    !current.readyVersions.some((item) => item.version === toVersion)
+  ) {
+    return;
+  }
+  let state = beginTripPlanDiff(current, fromVersion, toVersion);
+  setViewState(page, state);
+  syncPage(page, state, page.data.plan);
+  try {
+    const result = await tripPlanService.getTripPlanDiff(page.data.tripId, fromVersion, toVersion);
+    if (!viewStates.has(page)) return;
+    state = applyTripPlanDiffResult(getViewState(page), result);
+    setViewState(page, state);
+    syncPage(page, state, page.data.plan);
+  } catch (error: unknown) {
+    if (!viewStates.has(page)) return;
+    state = applyTripPlanViewError(getViewState(page), getTripPlanUserMessage(error));
+    setViewState(page, state);
+    syncPage(page, state, page.data.plan);
+  }
+};
+
+const restoreVersion = async (
+  page: PageInstance<TripPlanPageData>,
+  version: number,
+): Promise<void> => {
+  const state = getViewState(page);
+  if (
+    page.data.tripId.length === 0 ||
+    state.isSwitching ||
+    state.restoringVersion !== undefined ||
+    state.selectedVersion === version ||
+    !state.readyVersions.some((item) => item.version === version)
+  ) {
+    return;
+  }
+  const oldPlan = page.data.plan;
+  let nextState = beginTripPlanVersionRestore(state, version);
+  setViewState(page, nextState);
+  syncPage(page, nextState, oldPlan);
+  try {
+    const result = await tripPlanService.restoreTripPlanVersion(page.data.tripId, version);
+    if (!viewStates.has(page)) return;
+    nextState = applyTripPlanVersionRestoreResult(getViewState(page), result);
+    setViewState(page, nextState);
+    syncPage(page, nextState, displayPlan(nextState));
+  } catch (error: unknown) {
+    if (!viewStates.has(page)) return;
+    nextState = applyTripPlanViewError(getViewState(page), getTripPlanUserMessage(error));
+    setViewState(page, nextState);
+    syncPage(page, nextState, oldPlan);
+  }
+};
+
+const pickerIndexFromEvent = (event: TripPlanPageEvent): number | undefined => {
+  const value = event.detail?.value;
+  if (value === undefined || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+};
+
+const restoreVersionFromEvent = (event: TripPlanPageEvent): number | undefined => {
+  const value = event.currentTarget?.dataset?.version;
+  if (value === undefined || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 2_147_483_647
+    ? parsed
+    : undefined;
+};
+
 Page<TripPlanPageData>({
   data: {
     tripId: '',
@@ -253,6 +354,12 @@ Page<TripPlanPageData>({
     readyVersionLabels: [],
     versionPickerIndex: 0,
     regenerateInstructions: {},
+    diffFromVersion: 0,
+    diffToVersion: 0,
+    diffFromPickerIndex: 0,
+    diffToPickerIndex: 0,
+    diffVersionLabels: [],
+    isDiffLoading: false,
   },
 
   onLoad(this: PageInstance<TripPlanPageData>, options: TripPlanRouteOptions): void {
@@ -314,6 +421,34 @@ Page<TripPlanPageData>({
     const dayNumber = dayNumberFromEvent(event);
     if (dayNumber === undefined) return;
     void regenerateDay(this, dayNumber);
+  },
+
+  onDiffFromChange(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    const index = pickerIndexFromEvent(event);
+    if (index === undefined) return;
+    const ready = getViewState(this).readyVersions;
+    const version = ready[index];
+    if (version === undefined) return;
+    this.setData({ diffFromVersion: version.version, diffFromPickerIndex: index });
+  },
+
+  onDiffToChange(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    const index = pickerIndexFromEvent(event);
+    if (index === undefined) return;
+    const ready = getViewState(this).readyVersions;
+    const version = ready[index];
+    if (version === undefined) return;
+    this.setData({ diffToVersion: version.version, diffToPickerIndex: index });
+  },
+
+  onCompareVersions(this: PageInstance<TripPlanPageData>): void {
+    void loadDiff(this, this.data.diffFromVersion, this.data.diffToVersion);
+  },
+
+  onRestoreVersion(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    const version = restoreVersionFromEvent(event);
+    if (version === undefined) return;
+    void restoreVersion(this, version);
   },
 
   onRetry(this: PageInstance<TripPlanPageData>): void {

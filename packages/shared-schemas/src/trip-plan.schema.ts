@@ -22,6 +22,24 @@ import {
   type TripPlanVersionStatus,
   type TripPlanVersionSummary,
   TRIP_PLAN_VERSION_STATUSES,
+  TRIP_PLAN_BUDGET_CHANGE_FIELDS,
+  TRIP_PLAN_DAY_CHANGE_FIELDS,
+  TRIP_PLAN_ITEM_CHANGE_FIELDS,
+  TRIP_PLAN_ITEM_CHANGE_TYPES,
+  TRIP_PLAN_ROOT_CHANGE_FIELDS,
+  MAX_TRIP_PLAN_DIFF_DAY_CHANGES,
+  MAX_TRIP_PLAN_DIFF_ITEM_CHANGES,
+  type RestoreTripPlanVersionInput,
+  type RestoreTripPlanVersionResult,
+  type TripPlanBudgetDiff,
+  type TripPlanDayChange,
+  type TripPlanDayChangeField,
+  type TripPlanItemChange,
+  type TripPlanItemChangeField,
+  type TripPlanItemChangeType,
+  type TripPlanVersionDiffInput,
+  type TripPlanVersionDiffResult,
+  type TripPlanRootChangeField,
 } from '@travel-guide/shared-types';
 
 import { PlaceSchema } from './place.schema';
@@ -759,6 +777,251 @@ export const RegenerateTripPlanDayResultSchema: z.ZodType<
       });
     }
   });
+
+const tripPlanItemChangeTypeSchema: z.ZodType<TripPlanItemChangeType, z.ZodTypeDef, unknown> =
+  z.enum(TRIP_PLAN_ITEM_CHANGE_TYPES);
+
+const tripPlanItemChangeFieldSchema: z.ZodType<TripPlanItemChangeField, z.ZodTypeDef, unknown> =
+  z.enum(TRIP_PLAN_ITEM_CHANGE_FIELDS);
+
+const tripPlanDayChangeFieldSchema: z.ZodType<
+  TripPlanDayChangeField | TripPlanRootChangeField,
+  z.ZodTypeDef,
+  unknown
+> = z.enum([...TRIP_PLAN_DAY_CHANGE_FIELDS, ...TRIP_PLAN_ROOT_CHANGE_FIELDS] as [
+  TripPlanDayChangeField | TripPlanRootChangeField,
+  ...(TripPlanDayChangeField | TripPlanRootChangeField)[],
+]);
+
+const tripPlanBudgetChangeFieldSchema = z.enum(TRIP_PLAN_BUDGET_CHANGE_FIELDS);
+
+export const TripPlanItemChangeTypeSchema = tripPlanItemChangeTypeSchema;
+export const TripPlanItemChangeFieldSchema = tripPlanItemChangeFieldSchema;
+export const TripPlanDayChangeFieldSchema = tripPlanDayChangeFieldSchema;
+export const TripPlanBudgetChangeFieldSchema = tripPlanBudgetChangeFieldSchema;
+
+export const TripPlanVersionDiffInputSchema: z.ZodType<
+  TripPlanVersionDiffInput,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    fromVersion: versionSchema,
+    toVersion: versionSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.fromVersion === value.toVersion) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['toVersion'],
+        message: 'fromVersion and toVersion must be different',
+      });
+    }
+  });
+
+export const TripPlanItemChangeSchema: z.ZodType<TripPlanItemChange, z.ZodTypeDef, unknown> = z
+  .object({
+    dayNumber: z.number().finite().int().min(1).max(MAX_TRIP_PLAN_DAYS),
+    itemId: z.string().uuid(),
+    changeType: tripPlanItemChangeTypeSchema,
+    changedFields: z.array(tripPlanItemChangeFieldSchema).max(TRIP_PLAN_ITEM_CHANGE_FIELDS.length),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.changeType === 'modified' && value.changedFields.length === 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['changedFields'],
+        message: 'modified items must list changed fields',
+      });
+    }
+    if (value.changeType !== 'modified' && value.changedFields.length > 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['changedFields'],
+        message: 'added or removed items must not list modified fields',
+      });
+    }
+    if (new Set(value.changedFields).size !== value.changedFields.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['changedFields'],
+        message: 'changedFields must not contain duplicates',
+      });
+    }
+  });
+
+export const TripPlanDayChangeSchema: z.ZodType<TripPlanDayChange, z.ZodTypeDef, unknown> = z
+  .object({
+    // dayNumber 0 is a deterministic plan-level bucket for global tips and recommendations.
+    dayNumber: z.number().finite().int().min(0).max(MAX_TRIP_PLAN_DAYS),
+    changedFields: z
+      .array(tripPlanDayChangeFieldSchema)
+      .max(TRIP_PLAN_DAY_CHANGE_FIELDS.length + TRIP_PLAN_ROOT_CHANGE_FIELDS.length),
+    itemChanges: z.array(TripPlanItemChangeSchema).max(MAX_TRIP_PLAN_DIFF_ITEM_CHANGES),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.changedFields).size !== value.changedFields.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['changedFields'],
+        message: 'changedFields must not contain duplicates',
+      });
+    }
+    if (value.dayNumber === 0 && value.itemChanges.length > 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['itemChanges'],
+        message: 'plan-level changes cannot contain item changes',
+      });
+    }
+  });
+
+export const TripPlanBudgetDiffSchema: z.ZodType<TripPlanBudgetDiff, z.ZodTypeDef, unknown> = z
+  .object({
+    beforeTotalCny: moneySchema,
+    afterTotalCny: moneySchema,
+    changedFields: z
+      .array(tripPlanBudgetChangeFieldSchema)
+      .min(1)
+      .max(TRIP_PLAN_BUDGET_CHANGE_FIELDS.length),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.changedFields).size !== value.changedFields.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['changedFields'],
+        message: 'changedFields must not contain duplicates',
+      });
+    }
+  });
+
+export const TripPlanVersionDiffResultSchema: z.ZodType<
+  TripPlanVersionDiffResult,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    tripId: z.string().uuid(),
+    fromVersion: versionSchema,
+    toVersion: versionSchema,
+    dayChanges: z.array(TripPlanDayChangeSchema).max(MAX_TRIP_PLAN_DIFF_DAY_CHANGES),
+    budgetDiff: TripPlanBudgetDiffSchema.optional(),
+    hasChanges: z.boolean(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.fromVersion === value.toVersion) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['toVersion'],
+        message: 'fromVersion and toVersion must be different',
+      });
+    }
+    const computed = value.dayChanges.length > 0 || value.budgetDiff !== undefined;
+    if (computed !== value.hasChanges) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['hasChanges'],
+        message: 'hasChanges must match the diff contents',
+      });
+    }
+    const itemChangeCount = value.dayChanges.reduce(
+      (total, day) => total + day.itemChanges.length,
+      0,
+    );
+    if (itemChangeCount > MAX_TRIP_PLAN_DIFF_ITEM_CHANGES) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['dayChanges'],
+        message: 'item diff exceeds the supported limit',
+      });
+    }
+  });
+
+/** Alias kept for callers that use the shorter result name. */
+export const TripPlanDiffResultSchema = TripPlanVersionDiffResultSchema;
+export const TripPlanDiffInputSchema = TripPlanVersionDiffInputSchema;
+
+export const RestoreTripPlanVersionInputSchema: z.ZodType<
+  RestoreTripPlanVersionInput,
+  z.ZodTypeDef,
+  unknown
+> = z.object({}).strict();
+
+export const RestoreTripPlanVersionResultSchema: z.ZodType<
+  RestoreTripPlanVersionResult,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    tripId: z.string().uuid(),
+    sourceVersion: versionSchema,
+    version: versionSchema,
+    status: z.literal('ready'),
+    plan: TripPlanSchema,
+    summary: TripPlanVersionSummarySchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.summary.version !== value.version) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['version'],
+        message: 'version must match summary.version',
+      });
+    }
+    if (value.summary.status !== 'ready') {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['summary', 'status'],
+        message: 'restored summary must be ready',
+      });
+    }
+    if (value.summary.tripId !== value.tripId || value.plan.tripId !== value.tripId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['tripId'],
+        message: 'restored result trip ids must match',
+      });
+    }
+    if (
+      value.summary.generatedAt === undefined ||
+      value.plan.generatedAt !== value.summary.generatedAt
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan', 'generatedAt'],
+        message: 'restored plan generatedAt must match summary.generatedAt',
+      });
+    }
+    if (value.version <= value.sourceVersion) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['version'],
+        message: 'restore must create a strictly newer version',
+      });
+    }
+  });
+
+/** Alias kept for callers that use the TripPlan-prefixed result name. */
+export const TripPlanRestoreVersionResultSchema = RestoreTripPlanVersionResultSchema;
+export const TripPlanRestoreVersionInputSchema = RestoreTripPlanVersionInputSchema;
+
+export {
+  compareTripPlanVersions,
+  withTripPlanVersionDiffVersions,
+  TripPlanDiffValidationError,
+} from '@travel-guide/shared-types';
+
+export {
+  MAX_TRIP_PLAN_DIFF_DAY_CHANGES,
+  MAX_TRIP_PLAN_DIFF_FIELDS,
+  MAX_TRIP_PLAN_DIFF_ITEM_CHANGES,
+} from '@travel-guide/shared-types';
 
 export {
   MAX_TRIP_PLAN_DAYS as TRIP_PLAN_MAX_DAYS,

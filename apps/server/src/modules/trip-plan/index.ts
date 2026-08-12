@@ -9,6 +9,7 @@ export * from './trip-plan.tokens';
 export * from './trip-plan.controller';
 export * from './trip-plan.service';
 export * from './trip-plan.clock';
+export * from './trip-plan-diff';
 export * from './repositories/trip-plan.repository';
 export * from './config';
 export * from './providers';
