@@ -37,6 +37,14 @@ import {
 } from './modules/trip-plan/config/llm-environment';
 import type { LLMFetch, LLMProvider } from './modules/trip-plan/providers';
 import { TripPlanModule } from './modules/trip-plan/trip-plan.module';
+import { TripPlanController } from './modules/trip-plan/trip-plan.controller';
+import { TripPlanService } from './modules/trip-plan/trip-plan.service';
+import { TRIP_PLAN_CLOCK, TRIP_PLAN_REPOSITORY } from './modules/trip-plan/trip-plan.tokens';
+import {
+  DrizzleTripPlanRepository,
+  type TripPlanRepository,
+} from './modules/trip-plan/repositories/trip-plan.repository';
+import { systemTripPlanClock, type TripPlanClock } from './modules/trip-plan/trip-plan.clock';
 
 export { ENVIRONMENT_CONFIG } from './config/tokens';
 
@@ -59,6 +67,9 @@ export interface AppModuleOptions
   readonly llmEnvironment?: LlmEnvironment;
   readonly llmProvider?: LLMProvider;
   readonly llmFetch?: LLMFetch;
+  readonly tripPlanRepository?: TripPlanRepository;
+  readonly tripPlanVersionRepository?: TripPlanRepository;
+  readonly tripPlanClock?: TripPlanClock;
 }
 
 @Module({
@@ -82,6 +93,11 @@ export class AppModule {
     const llmEnvironment =
       options.llmEnvironment ??
       (environment.nodeEnv === 'test' ? createTestLlmEnvironment() : loadLlmEnvironment());
+    const configuredTripPlanRepository =
+      options.tripPlanRepository ?? options.tripPlanVersionRepository;
+    const tripPlanRepositoryProvider = configuredTripPlanRepository
+      ? { provide: TRIP_PLAN_REPOSITORY, useValue: configuredTripPlanRepository }
+      : { provide: TRIP_PLAN_REPOSITORY, useClass: DrizzleTripPlanRepository };
 
     return {
       module: AppModule,
@@ -120,12 +136,18 @@ export class AppModule {
           llmFetch: options.llmFetch,
         }),
       ],
-      controllers: extraControllers,
+      controllers: [...extraControllers, TripPlanController],
       providers: [
         {
           provide: ENVIRONMENT_CONFIG,
           useValue: environment,
         },
+        tripPlanRepositoryProvider,
+        {
+          provide: TRIP_PLAN_CLOCK,
+          useValue: options.tripPlanClock ?? systemTripPlanClock,
+        },
+        TripPlanService,
       ],
       exports: [ENVIRONMENT_CONFIG],
     };

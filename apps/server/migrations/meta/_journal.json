@@ -29,6 +29,13 @@
       "when": 1786431469176,
       "tag": "0004_robust_scorpion",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786442686470,
+      "tag": "0005_trip_plan_versions",
+      "breakpoints": true
     }
   ]
 }

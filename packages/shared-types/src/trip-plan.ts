@@ -106,3 +106,38 @@ export interface TripPlan {
   generalTips: string[];
   generatedAt: string;
 }
+
+/** The generation endpoint intentionally accepts no caller-controlled data. */
+export type GenerateTripPlanInput = Record<string, never>;
+
+export const TRIP_PLAN_VERSION_STATUSES = ['generating', 'ready', 'failed'] as const;
+
+export type TripPlanVersionStatus = (typeof TRIP_PLAN_VERSION_STATUSES)[number];
+
+/** Metadata for one persisted, immutable TripPlan version. */
+export interface TripPlanVersionSummary {
+  id: string;
+  tripId: string;
+  version: number;
+  schemaVersion: '1.0';
+  status: TripPlanVersionStatus;
+  generatedAt?: string;
+  createdAt: string;
+}
+
+/** Version list returned by the latest-plan endpoint. */
+export interface TripPlanVersionListResult {
+  items: TripPlanVersionSummary[];
+  latestVersion?: number;
+  /** The latest ready plan, when one exists. */
+  plan?: TripPlan;
+}
+
+/** Generation and version-read result. */
+export interface TripPlanGenerationResult {
+  version: number;
+  status: TripPlanVersionStatus;
+  plan?: TripPlan;
+  summary: TripPlanVersionSummary;
+  tripId: string;
+}

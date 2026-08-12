@@ -26,6 +26,10 @@ import type { RouteProvider } from './modules/routes/providers/route.provider';
 import type { RouteFetch } from './modules/routes/providers/amap-route.provider';
 import type { RouteCacheRepository } from './modules/routes/repositories/route-cache.repository';
 import type { RouteClock } from './modules/routes/route.clock';
+import type { LLMFetch, LLMProvider } from './modules/trip-plan/providers';
+import type { LlmEnvironment } from './modules/trip-plan/config/llm-environment';
+import type { TripPlanClock } from './modules/trip-plan/trip-plan.clock';
+import type { TripPlanRepository } from './modules/trip-plan/repositories/trip-plan.repository';
 
 export interface CreateAppOptions {
   extraControllers?: Type<object>[];
@@ -48,6 +52,12 @@ export interface CreateAppOptions {
   routeCacheRepository?: RouteCacheRepository;
   routeClock?: RouteClock;
   routeFetch?: RouteFetch;
+  llmEnvironment?: LlmEnvironment;
+  llmProvider?: LLMProvider;
+  llmFetch?: LLMFetch;
+  tripPlanRepository?: TripPlanRepository;
+  tripPlanVersionRepository?: TripPlanRepository;
+  tripPlanClock?: TripPlanClock;
 }
 
 export async function createApp(
@@ -75,6 +85,12 @@ export async function createApp(
       routeCacheRepository: options.routeCacheRepository,
       routeClock: options.routeClock,
       routeFetch: options.routeFetch,
+      llmEnvironment: options.llmEnvironment,
+      llmProvider: options.llmProvider,
+      llmFetch: options.llmFetch,
+      tripPlanRepository: options.tripPlanRepository,
+      tripPlanVersionRepository: options.tripPlanVersionRepository,
+      tripPlanClock: options.tripPlanClock,
     }),
     new FastifyAdapter(),
     { logger: ['error', 'warn', 'log'] },

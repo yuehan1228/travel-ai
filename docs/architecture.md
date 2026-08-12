@@ -167,3 +167,23 @@ OpenAI-compatible Chat Completions Provider，测试使用 `FakeLLMProvider`。`
 unavailable 路线作为交通耗时都会稳定失败。`climate_reference` 天气必须原样保留并带有
 `WEATHER_CLIMATE_REFERENCE` warning；unavailable 天气不能携带测量值。没有已验证 POI 时返回 `TRIP_PLAN_UNAVAILABLE`。
 该层不主动调用地图、天气或路线 Provider，不执行自动修复或多轮 Agent。
+
+### TripPlan 生成 API 与版本持久化（TASK-017）
+
+`TripPlanController` 在 `AuthGuard` 和 `CurrentUserId` 后提供 `POST /trips/:id/generate`、
+`GET /trips/:id/plan` 与 `GET /trips/:id/plan/:version`。生成请求体是严格空对象，所有 Trip 输入和上下文数据
+均由服务端按 `userId + tripId` 读取并通过既有 Weather/Place/Route/RouteOrder Service 及
+`TripPlanGenerationContextSchema` 验证；LLM Provider 只调用一次，客户端不能指定模型、Provider、POI、天气、路线或
+密钥。成功输出经 `TripPlanSchema` 和共享版本结果 Schema 再次校验，实体不一致、输出篡改、上下文不完整和 Provider
+不可用分别映射稳定错误码，不记录 Prompt、密钥或原始响应。
+
+`DrizzleTripPlanRepository` 在事务中执行原子预留和保存：`draft`、`ready`、`failed` 可以进入
+`generating`，并发请求只有一个成功；版本使用 `(trip_id, version)` 唯一约束并递增。成功同时保存
+`trip_plan_versions`、`trip_plan_days`、`trip_plan_items` 后置为 `ready`；异常只保留 `failed` 元数据，不留部分
+快照或子表记录。读取始终带用户隔离条件，跨用户与不存在记录不可区分；最新列表只允许指向 ready 版本，并在读后通过
+共享 Schema 校验 `tripId`、版本和状态一致性。所有响应使用 Api Envelope，`x-request-id` 和 `requestId` 保持一致。
+
+小程序 `TripPlanService` 仅封装三个只读/生成调用，复用 `HttpClient`、`AuthService` 和共享 Zod Runtime Schema；
+无 Token 不发网络请求，认证失效清除本地 Token。TASK-017 不包含编辑、单日重生成、公开未认证分享、页面、地图 UI、
+实时价格、Redis、队列或精确 TSP。Migration 由 Drizzle Kit 生成并登记在 `apps/server/migrations/meta`，应用启动不自动
+执行；部署前必须人工审阅 `0005_trip_plan_versions.sql` 并显式运行 `db:migrate`。

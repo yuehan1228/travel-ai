@@ -14,6 +14,12 @@ import {
   type TripPlanItemType,
   type TripPlanWarning,
   type TripPlanWarningSeverity,
+  type GenerateTripPlanInput,
+  type TripPlanGenerationResult,
+  type TripPlanVersionListResult,
+  type TripPlanVersionStatus,
+  type TripPlanVersionSummary,
+  TRIP_PLAN_VERSION_STATUSES,
 } from '@travel-guide/shared-types';
 
 import { PlaceSchema } from './place.schema';
@@ -460,6 +466,201 @@ export const TripPlanSchema: z.ZodType<TripPlan, z.ZodTypeDef, unknown> = z
         });
       }
     });
+  });
+
+/** Empty, strict request body: all context is assembled from the authenticated trip. */
+export const GenerateTripPlanInputSchema: z.ZodType<GenerateTripPlanInput, z.ZodTypeDef, unknown> =
+  z.object({}).strict();
+
+export const TripPlanVersionStatusSchema: z.ZodType<TripPlanVersionStatus, z.ZodTypeDef, unknown> =
+  z.enum(TRIP_PLAN_VERSION_STATUSES);
+
+export const MAX_TRIP_PLAN_VERSIONS = 100;
+
+const versionSchema = z
+  .number({ invalid_type_error: 'version must be a number' })
+  .finite({ message: 'version must be finite' })
+  .int({ message: 'version must be an integer' })
+  .min(1, { message: 'version must be at least 1' })
+  .max(2_147_483_647, { message: 'version is too large' });
+
+const optionalTimestampSchema = z.string().datetime({ offset: true }).optional();
+
+export const TripPlanVersionSummarySchema: z.ZodType<
+  TripPlanVersionSummary,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    id: z.string().uuid(),
+    tripId: z.string().uuid(),
+    version: versionSchema,
+    schemaVersion: z.literal('1.0'),
+    status: TripPlanVersionStatusSchema,
+    generatedAt: optionalTimestampSchema,
+    createdAt: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.status === 'ready' && value.generatedAt === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['generatedAt'],
+        message: 'ready versions must contain generatedAt',
+      });
+    }
+  });
+
+export const TripPlanVersionListResultSchema: z.ZodType<
+  TripPlanVersionListResult,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    items: z.array(TripPlanVersionSummarySchema).max(MAX_TRIP_PLAN_VERSIONS),
+    latestVersion: versionSchema.optional(),
+    plan: TripPlanSchema.optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const versions = new Set<number>();
+    const tripIds = new Set(value.items.map((item) => item.tripId));
+    for (const [index, item] of value.items.entries()) {
+      if (versions.has(item.version)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['items', index, 'version'],
+          message: 'version items must be unique',
+        });
+      }
+      versions.add(item.version);
+    }
+    if (tripIds.size > 1) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['items'],
+        message: 'all version items must belong to the same trip',
+      });
+    }
+
+    if (value.latestVersion === undefined) {
+      if (value.plan !== undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['plan'],
+          message: 'plan requires latestVersion',
+        });
+      }
+      return;
+    }
+
+    const latest = value.items.find((item) => item.version === value.latestVersion);
+    if (latest === undefined || latest.status !== 'ready') {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['latestVersion'],
+        message: 'latestVersion must reference a ready version item',
+      });
+      return;
+    }
+    if (value.items.some((item) => item.status === 'ready' && item.version > latest.version)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['latestVersion'],
+        message: 'latestVersion must reference the highest ready version',
+      });
+    }
+    if (value.plan === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan'],
+        message: 'latestVersion requires its ready plan',
+      });
+    } else {
+      if (value.plan.tripId !== latest.tripId) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['plan', 'tripId'],
+          message: 'plan.tripId must match the latest version item',
+        });
+      }
+      if (latest.generatedAt !== undefined && value.plan.generatedAt !== latest.generatedAt) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['plan', 'generatedAt'],
+          message: 'plan.generatedAt must match the latest version item',
+        });
+      }
+    }
+  });
+
+export const TripPlanGenerationResultSchema: z.ZodType<
+  TripPlanGenerationResult,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    version: versionSchema,
+    status: TripPlanVersionStatusSchema,
+    plan: TripPlanSchema.optional(),
+    summary: TripPlanVersionSummarySchema,
+    tripId: z.string().uuid(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.summary.version !== value.version) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['version'],
+        message: 'version must match summary.version',
+      });
+    }
+    if (value.summary.status !== value.status) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['status'],
+        message: 'status must match summary.status',
+      });
+    }
+    if (value.summary.tripId !== value.tripId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['tripId'],
+        message: 'tripId must match summary.tripId',
+      });
+    }
+    if (value.plan !== undefined && value.plan.tripId !== value.tripId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan', 'tripId'],
+        message: 'plan.tripId must match tripId',
+      });
+    }
+    if (
+      value.plan !== undefined &&
+      value.summary.generatedAt !== undefined &&
+      value.plan.generatedAt !== value.summary.generatedAt
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan', 'generatedAt'],
+        message: 'plan.generatedAt must match summary.generatedAt',
+      });
+    }
+    if (value.status === 'ready' && value.plan === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan'],
+        message: 'ready results must contain a plan',
+      });
+    }
+    if (value.status !== 'ready' && value.plan !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan'],
+        message: 'non-ready results must not contain a plan',
+      });
+    }
   });
 
 export {

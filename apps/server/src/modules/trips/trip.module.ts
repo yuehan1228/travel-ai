@@ -29,7 +29,7 @@ export class TripModule {
         : [DatabaseModule.register(options.databaseEnvironment ?? loadDatabaseEnvironment())],
       controllers: [TripsController],
       providers: [repositoryProvider, TripService],
-      exports: [TripService, TRIP_REPOSITORY],
+      exports: [TripService, TRIP_REPOSITORY, ...(options.tripRepository ? [] : [DatabaseModule])],
     };
   }
 }

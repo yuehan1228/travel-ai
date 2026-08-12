@@ -93,6 +93,29 @@ Structured Output 与小程序 Runtime 校验；Schema 只能校验来源字段�
 和天气白名单。OpenAI-compatible Provider 只从服务端 `LLM_*` 配置读取 Host、API Key 和模型，设置请求超时，供应商
 原始响应和 Prompt 不写入日志；测试只使用 Fake Provider。当前仍不包含攻略生成接口、数据库表或攻略页面。
 
+### TripPlan 生成 API（TASK-017）
+
+TripPlan 生成已经接入受认证的版本化 API：`POST /trips/:id/generate` 只接受严格空对象 `{}`，
+服务端从当前用户拥有的 Trip 组装已验证的输入、天气、POI、路线和路线顺序；客户端不能传入模型、Provider、
+Prompt、天气或 POI。读取使用 `GET /trips/:id/plan`（版本摘要及最新 ready 快照）和
+`GET /trips/:id/plan/:version`（指定版本）。三个接口都要求 `Authorization: Bearer <access-token>`，
+并返回共享 `ApiSuccess` Envelope；`x-request-id` 与 Envelope 的 `requestId` 一致。
+
+版本状态为 `generating`、`ready`、`failed`。一次只有一个请求可以从 `draft`、`ready` 或 `failed` 原子预留为
+`generating`；并发请求返回 `TRIP_PLAN_GENERATION_IN_PROGRESS`。成功事务同时写入
+`trip_plan_versions`、`trip_plan_days` 和 `trip_plan_items` 并切换为 `ready`；失败事务切换为 `failed`，不保存
+部分 Plan 快照，版本号按 Trip 递增且不可修改。所有读取和写入同时带 `userId` 与 `tripId`，跨用户和不存在的
+Trip/版本使用统一的脱敏错误。稳定错误包括 `TRIP_NOT_FOUND`、`TRIP_PLAN_NOT_FOUND`、
+`TRIP_PLAN_GENERATION_IN_PROGRESS`、`TRIP_PLAN_VALIDATION_ERROR`、`TRIP_PLAN_PROVIDER_ERROR`、
+`TRIP_PLAN_OUTPUT_INVALID`、`TRIP_PLAN_ENTITY_MISMATCH`、`TRIP_PLAN_UNAVAILABLE` 和
+`TRIP_PLAN_PERSISTENCE_ERROR`。
+
+新增 Drizzle Migration `apps/server/migrations/0005_trip_plan_versions.sql` 及对应 `migrations/meta` journal/snapshot，
+包含版本唯一约束、日/条目外键、状态/快照检查和索引。应用启动不会自动执行 Migration；请先审阅 SQL，再显式运行
+`pnpm --filter @travel-guide/server db:migrate`。小程序仅提供类型安全的
+`generateTripPlan`、`getLatestTripPlan`、`getTripPlanVersion` 服务，复用 HTTP/Auth/Bearer 和共享 Schema；缺少 Token
+不会联网，`AUTH_TOKEN_INVALID` 会清理认证状态。不新增攻略编辑、单日重生成、页面、地图 UI、实时价格或精确 TSP。
+
 访问顺序建议使用需要认证的 `POST /routes/order`，在真实路线矩阵上运行确定性的最近邻（nearest-neighbor）贪心算法。
 请求可指定 `startId` 和 `endId`；未指定起点时按点 ID 字典序选择，候选路线按预计耗时、距离和目标 ID 依次打破平局，
 并将指定终点保留到最后。不可用的两点路线不会参与候选；若无法覆盖全部点则返回 `ROUTE_ORDER_UNAVAILABLE`。结果明确标记
