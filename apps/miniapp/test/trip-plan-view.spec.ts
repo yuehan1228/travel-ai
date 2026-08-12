@@ -5,8 +5,10 @@ import type { TripPlan } from '@travel-guide/shared-types';
 import { RequestError } from '../services/request-error';
 import {
   applyLatestTripPlanResult,
+  applyTripPlanDayRegenerationResult,
   applyTripPlanViewError,
   applyTripPlanVersionResult,
+  beginTripPlanDayRegeneration,
   createTripPlanDisplayModel,
   createTripPlanViewState,
   createTripPlanViewStateRegistry,
@@ -167,6 +169,37 @@ describe('TripPlan view adapters', () => {
     expect(() => parseLatestTripPlanResult({ items: [], unexpected: true })).toThrowError(
       RequestError,
     );
+  });
+
+  it('single-flights day replacement and switches only after a ready result', () => {
+    const state = applyLatestTripPlanResult(createTripPlanViewState(tripId), {
+      items: [readySummary],
+      latestVersion: 1,
+      plan,
+    });
+    const loading = beginTripPlanDayRegeneration(state, 1);
+    expect(loading.regeneratingDay).toBe(1);
+    expect(beginTripPlanDayRegeneration(loading, 2)).toBe(loading);
+
+    const nextSummary = {
+      ...readySummary,
+      id: '323e4567-e89b-12d3-a456-426614174000',
+      version: 2,
+    };
+    const nextPlan = { ...plan, summary: '新的第一天安排' };
+    const switched = applyTripPlanDayRegenerationResult(loading, {
+      version: 2,
+      status: 'ready',
+      tripId,
+      plan: nextPlan,
+      summary: nextSummary,
+      sourceVersion: 1,
+      dayNumber: 1,
+    });
+    expect(switched.plan?.summary).toBe('新的第一天安排');
+    expect(switched.selectedVersion).toBe(2);
+    expect(switched.regeneratingDay).toBeUndefined();
+    expect(switched.readyVersions[0]?.version).toBe(2);
   });
 
   it('renders all days and exposes generated metadata in the display model', () => {

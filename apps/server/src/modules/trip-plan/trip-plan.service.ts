@@ -4,6 +4,8 @@ import {
   CreateTripInputSchema,
   GenerateTripPlanInputSchema,
   PlaceListResultSchema,
+  RegenerateTripPlanDayInputSchema,
+  RegenerateTripPlanDayResultSchema,
   TripIdSchema,
   TripPlanGenerationResultSchema,
   TripPlanSchema,
@@ -17,6 +19,8 @@ import type {
   EstimateRouteOrderInput,
   GetWeatherInput,
   GenerateTripPlanInput,
+  RegenerateTripPlanDayInput,
+  RegenerateTripPlanDayResult,
   PlaceCategory,
   PlaceListResult,
   SearchPlacesInput,
@@ -37,6 +41,8 @@ import type { TripRecord, TripRepository } from '../trips/repositories/trip.repo
 import { TripPlanException } from './trip-plan.errors';
 import { TripPlanGenerationContextSchema } from './trip-plan-generation.schema';
 import type { TripPlanGenerationContext } from './trip-plan-generation.types';
+import { TripPlanDayRegenerationContextSchema } from './trip-plan-day-regeneration.schema';
+import type { TripPlanDayRegenerationContext } from './trip-plan-day-regeneration.types';
 import { TripPlanGenerationService } from './trip-plan-generation.service';
 import { TRIP_PLAN_CLOCK, TRIP_PLAN_REPOSITORY } from './trip-plan.tokens';
 import { systemTripPlanClock, type TripPlanClock } from './trip-plan.clock';
@@ -49,6 +55,8 @@ import {
 
 export interface TripPlanGenerator {
   generate(context: TripPlanGenerationContext): Promise<TripPlan>;
+  regenerateDay?(context: TripPlanDayRegenerationContext): Promise<TripPlan['days'][number]>;
+  generateDay?(context: TripPlanDayRegenerationContext): Promise<TripPlan['days'][number]>;
 }
 
 export interface TripPlanWeatherReader {
@@ -75,6 +83,9 @@ const tripNotFoundError = (): TripPlanException =>
 
 const planNotFoundError = (): TripPlanException =>
   new TripPlanException('TRIP_PLAN_NOT_FOUND', 404, 'The requested TripPlan was not found');
+
+const dayNotFoundError = (): TripPlanException =>
+  new TripPlanException('TRIP_PLAN_DAY_NOT_FOUND', 404, 'The requested TripPlan day was not found');
 
 const inProgressError = (): TripPlanException =>
   new TripPlanException(
@@ -125,6 +136,65 @@ const generationResult = (record: TripPlanVersionRecord): TripPlanGenerationResu
     tripId: record.tripId,
     ...(record.plan === undefined ? {} : { plan: record.plan }),
     summary,
+  };
+};
+
+const dayRegenerationResult = (
+  record: TripPlanVersionRecord,
+  sourceVersion: number,
+  dayNumber: number,
+): RegenerateTripPlanDayResult => ({
+  ...generationResult(record),
+  sourceVersion,
+  dayNumber,
+});
+
+const budgetCategoryForItem: Record<
+  TripPlan['days'][number]['items'][number]['type'],
+  'accommodationCny' | 'transportationCny' | 'foodCny' | 'attractionsCny' | 'otherCny'
+> = {
+  attraction: 'attractionsCny',
+  food: 'foodCny',
+  transport: 'transportationCny',
+  hotel: 'accommodationCny',
+  rest: 'otherCny',
+};
+
+const recomputePlanBudget = (plan: TripPlan, generatedAt: string): TripPlan => {
+  const categoryCents = {
+    accommodationCny: 0,
+    transportationCny: 0,
+    foodCny: 0,
+    attractionsCny: 0,
+    otherCny: 0,
+  };
+  const days = plan.days.map((day) => {
+    const estimatedCostCents = day.items.reduce(
+      (total, item) => total + Math.round(item.estimatedCostCny * 100),
+      0,
+    );
+    day.items.forEach((item) => {
+      categoryCents[budgetCategoryForItem[item.type]] += Math.round(item.estimatedCostCny * 100);
+    });
+    return {
+      ...day,
+      estimatedCostCny: estimatedCostCents / 100,
+    };
+  });
+  const totalCents = Object.values(categoryCents).reduce((total, value) => total + value, 0);
+  return {
+    ...plan,
+    days,
+    budget: {
+      currency: 'CNY',
+      totalCny: totalCents / 100,
+      accommodationCny: categoryCents.accommodationCny / 100,
+      transportationCny: categoryCents.transportationCny / 100,
+      foodCny: categoryCents.foodCny / 100,
+      attractionsCny: categoryCents.attractionsCny / 100,
+      otherCny: categoryCents.otherCny / 100,
+    },
+    generatedAt,
   };
 };
 
@@ -240,6 +310,191 @@ export class TripPlanService {
     }
   }
 
+  public async regenerateDay(
+    userId: string,
+    tripId: string,
+    input: RegenerateTripPlanDayInput,
+  ): Promise<RegenerateTripPlanDayResult> {
+    this.assertTripId(tripId);
+    const parsedInput = RegenerateTripPlanDayInputSchema.safeParse(input);
+    if (!parsedInput.success) throw validationError();
+    const now = this.clock.now();
+    if (Number.isNaN(now.getTime())) throw validationError();
+
+    let trip: TripRecord;
+    try {
+      const found = await this.tripRepository.findByIdForUser(userId, tripId);
+      if (found === undefined) throw tripNotFoundError();
+      trip = found;
+    } catch (error: unknown) {
+      if (error instanceof TripPlanException) throw error;
+      throw persistenceError();
+    }
+
+    let sourceRecord: TripPlanVersionRecord | undefined;
+    try {
+      sourceRecord = await this.repository.findVersionForUser(
+        userId,
+        tripId,
+        parsedInput.data.sourceVersion,
+      );
+    } catch {
+      throw persistenceError();
+    }
+    if (
+      sourceRecord === undefined ||
+      sourceRecord.status !== 'ready' ||
+      sourceRecord.plan === undefined
+    ) {
+      if (trip.status === 'generating') throw inProgressError();
+      throw planNotFoundError();
+    }
+    const sourcePlan = TripPlanSchema.safeParse(sourceRecord.plan);
+    if (!sourcePlan.success) throw persistenceError();
+    const sourceDay = sourcePlan.data.days.find(
+      (day) => day.dayNumber === parsedInput.data.dayNumber,
+    );
+    if (sourceDay === undefined) throw dayNotFoundError();
+
+    let reserved: Awaited<ReturnType<NonNullable<TripPlanRepository['reserveDayRegeneration']>>>;
+    try {
+      if (this.repository.reserveDayRegeneration !== undefined) {
+        reserved = await this.repository.reserveDayRegeneration(
+          userId,
+          tripId,
+          parsedInput.data.sourceVersion,
+          parsedInput.data.dayNumber,
+          parsedInput.data.instruction,
+          now,
+        );
+      } else {
+        const fallback = await this.repository.reserveGeneration(userId, tripId, now);
+        reserved =
+          fallback.status === 'reserved'
+            ? {
+                status: 'reserved',
+                reservation: {
+                  ...fallback.reservation,
+                  operation: 'regenerate-day',
+                  sourceVersion: parsedInput.data.sourceVersion,
+                  dayNumber: parsedInput.data.dayNumber,
+                  ...(parsedInput.data.instruction === undefined
+                    ? {}
+                    : { instruction: parsedInput.data.instruction }),
+                },
+              }
+            : fallback;
+      }
+    } catch {
+      throw persistenceError();
+    }
+    if (reserved.status === 'not_found') throw tripNotFoundError();
+    if (reserved.status === 'in_progress') throw inProgressError();
+    if (reserved.status === 'source_not_ready') throw planNotFoundError();
+    if (reserved.status === 'day_not_found') throw dayNotFoundError();
+    const reservation = reserved.reservation;
+
+    try {
+      const contextParts = await this.buildContext(reservation, now.toISOString());
+      const context: TripPlanDayRegenerationContext = {
+        tripId,
+        input: CreateTripInputSchema.parse(reservation.input),
+        sourceVersion: parsedInput.data.sourceVersion,
+        sourcePlan: sourcePlan.data,
+        dayNumber: parsedInput.data.dayNumber,
+        targetDay: sourceDay,
+        adjacentDays: sourcePlan.data.days
+          .filter(
+            (day) =>
+              day.dayNumber === parsedInput.data.dayNumber - 1 ||
+              day.dayNumber === parsedInput.data.dayNumber + 1,
+          )
+          .sort((left, right) => left.dayNumber - right.dayNumber),
+        ...(parsedInput.data.instruction === undefined
+          ? {}
+          : { instruction: parsedInput.data.instruction }),
+        weather: contextParts.weather,
+        candidatePlaces: contextParts.candidatePlaces,
+        routeEstimates: contextParts.routeEstimates,
+        ...(contextParts.routeOrders === undefined
+          ? {}
+          : { routeOrders: contextParts.routeOrders }),
+        generatedAt: now.toISOString(),
+      };
+      const contextValidation = TripPlanDayRegenerationContextSchema.safeParse(context);
+      if (!contextValidation.success) throw validationError();
+
+      let regeneratedDay: TripPlan['days'][number];
+      if (this.generationService.regenerateDay !== undefined) {
+        regeneratedDay = await this.generationService.regenerateDay(contextValidation.data);
+      } else if (this.generationService.generateDay !== undefined) {
+        regeneratedDay = await this.generationService.generateDay(contextValidation.data);
+      } else {
+        const generatedPlan = await this.generationService.generate(contextParts);
+        const generatedTarget = generatedPlan.days.find(
+          (day) => day.dayNumber === parsedInput.data.dayNumber,
+        );
+        if (generatedTarget === undefined) {
+          throw new TripPlanException(
+            'TRIP_PLAN_OUTPUT_INVALID',
+            502,
+            'The generated TripPlan is invalid',
+          );
+        }
+        regeneratedDay = generatedTarget;
+      }
+
+      const mergedPlan = recomputePlanBudget(
+        {
+          ...sourcePlan.data,
+          days: sourcePlan.data.days.map((day) =>
+            day.dayNumber === parsedInput.data.dayNumber ? regeneratedDay : day,
+          ),
+        },
+        now.toISOString(),
+      );
+      const validatedPlan = TripPlanSchema.safeParse(mergedPlan);
+      if (!validatedPlan.success) {
+        throw new TripPlanException(
+          'TRIP_PLAN_OUTPUT_INVALID',
+          502,
+          'The generated TripPlan is invalid',
+        );
+      }
+
+      let saved: TripPlanVersionRecord;
+      try {
+        saved = await this.repository.saveReady(
+          userId,
+          tripId,
+          reservation,
+          validatedPlan.data,
+          new Date(validatedPlan.data.generatedAt),
+        );
+      } catch {
+        throw persistenceError();
+      }
+      const result = dayRegenerationResult(
+        saved,
+        parsedInput.data.sourceVersion,
+        parsedInput.data.dayNumber,
+      );
+      const validatedResult = RegenerateTripPlanDayResultSchema.safeParse(result);
+      if (!validatedResult.success) throw persistenceError();
+      return validatedResult.data;
+    } catch (error: unknown) {
+      const mapped = error instanceof TripPlanException ? error : mapContextError(error);
+      try {
+        const failedAt = this.clock.now();
+        if (Number.isNaN(failedAt.getTime())) throw persistenceError();
+        await this.repository.markFailed(userId, tripId, reservation, failedAt);
+      } catch {
+        throw persistenceError();
+      }
+      throw mapped;
+    }
+  }
+
   public async getLatest(userId: string, tripId: string): Promise<TripPlanVersionListResult> {
     this.assertTripId(tripId);
     await this.requireTrip(userId, tripId);
@@ -304,6 +559,14 @@ export class TripPlanService {
     input: GenerateTripPlanInput = {},
   ): Promise<TripPlanGenerationResult> {
     return this.generate(userId, tripId, input);
+  }
+
+  public regenerateTripPlanDay(
+    userId: string,
+    tripId: string,
+    input: RegenerateTripPlanDayInput,
+  ): Promise<RegenerateTripPlanDayResult> {
+    return this.regenerateDay(userId, tripId, input);
   }
 
   public getLatestTripPlan(userId: string, tripId: string): Promise<TripPlanVersionListResult> {

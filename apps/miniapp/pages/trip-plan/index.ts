@@ -1,11 +1,16 @@
-import type { TripPlanVersionSummary } from '@travel-guide/shared-types';
+import type {
+  RegenerateTripPlanDayInput,
+  TripPlanVersionSummary,
+} from '@travel-guide/shared-types';
 
 import { tripPlanService } from '../../services/trip-plan.service';
 import {
   applyLatestTripPlanResult,
+  applyTripPlanDayRegenerationResult,
   applyTripPlanViewError,
   applyTripPlanVersionResult,
   beginTripPlanLoad,
+  beginTripPlanDayRegeneration,
   beginTripPlanVersionSwitch,
   createTripPlanDisplayModel,
   createTripPlanViewState,
@@ -42,7 +47,18 @@ interface TripPlanPageData {
   readyVersionLabels: string[];
   versionPickerIndex: number;
   selectedVersion?: number;
+  regeneratingDay?: number;
+  regenerateInstructions: Record<string, string>;
 }
+
+type TripPlanPageDisplayModel = Omit<TripPlanDisplayModel, 'days'> & {
+  days: Array<
+    TripPlanDisplayModel['days'][number] & {
+      regenerateInstruction: string;
+      isRegenerating: boolean;
+    }
+  >;
+};
 
 const viewStates = createTripPlanViewStateRegistry<PageInstance<TripPlanPageData>>();
 
@@ -79,19 +95,31 @@ const syncPage = (
 ): void => {
   const allVersions = toVersionOptions(state.allVersions);
   const readyVersions = toVersionOptions(state.readyVersions);
+  const display: TripPlanPageDisplayModel | undefined =
+    plan === undefined
+      ? undefined
+      : {
+          ...plan,
+          days: plan.days.map((day) => ({
+            ...day,
+            regenerateInstruction: page.data.regenerateInstructions[String(day.dayNumber)] ?? '',
+            isRegenerating: state.regeneratingDay === day.dayNumber,
+          })),
+        };
   page.setData({
     tripId: state.tripId,
     status: state.status,
     isLoading: state.status === 'loading',
     isSwitching: state.isSwitching,
     errorMessage: state.errorMessage,
-    plan,
+    plan: display,
     allVersions,
     readyVersions,
     allVersionLabels: allVersions.map((item) => `${item.label} · ${item.statusLabel}`),
     readyVersionLabels: readyVersions.map((item) => item.label),
     versionPickerIndex: selectedVersionIndex(readyVersions, state.selectedVersion),
     selectedVersion: state.selectedVersion,
+    regeneratingDay: state.regeneratingDay,
   });
 };
 
@@ -143,6 +171,75 @@ const loadVersion = async (
   }
 };
 
+interface TripPlanPageEvent {
+  readonly currentTarget?: { readonly dataset?: Record<string, string | undefined> };
+  readonly detail?: { readonly value?: string };
+}
+
+const dayNumberFromEvent = (event: TripPlanPageEvent): number | undefined => {
+  const value = event.currentTarget?.dataset?.dayNumber;
+  if (value === undefined || !/^\d+$/.test(value)) return undefined;
+  const dayNumber = Number(value);
+  return Number.isSafeInteger(dayNumber) && dayNumber >= 1 && dayNumber <= 14
+    ? dayNumber
+    : undefined;
+};
+
+const updateDayInstruction = (
+  page: PageInstance<TripPlanPageData>,
+  event: TripPlanPageEvent,
+): void => {
+  const dayNumber = dayNumberFromEvent(event);
+  const value = event.detail?.value;
+  if (dayNumber === undefined || value === undefined) return;
+  page.setData({
+    regenerateInstructions: {
+      ...page.data.regenerateInstructions,
+      [String(dayNumber)]: value.slice(0, 500),
+    },
+  });
+};
+
+const regenerateDay = async (
+  page: PageInstance<TripPlanPageData>,
+  dayNumber: number,
+): Promise<void> => {
+  const state = getViewState(page);
+  if (
+    page.data.isSwitching ||
+    state.regeneratingDay !== undefined ||
+    state.selectedVersion === undefined ||
+    page.data.tripId.length === 0
+  ) {
+    return;
+  }
+
+  const instruction = page.data.regenerateInstructions[String(dayNumber)]?.trim();
+  const request: RegenerateTripPlanDayInput = {
+    sourceVersion: state.selectedVersion,
+    dayNumber,
+    ...(instruction === undefined || instruction.length === 0 ? {} : { instruction }),
+  };
+  const oldPlan = page.data.plan;
+  let nextState = beginTripPlanDayRegeneration(state, dayNumber);
+  setViewState(page, nextState);
+  syncPage(page, nextState, oldPlan);
+
+  try {
+    const result = await tripPlanService.regenerateTripPlanDay(page.data.tripId, request);
+    if (!viewStates.has(page)) return;
+    nextState = applyTripPlanDayRegenerationResult(getViewState(page), result);
+    setViewState(page, nextState);
+    syncPage(page, nextState, displayPlan(nextState));
+  } catch (error: unknown) {
+    if (!viewStates.has(page)) return;
+    nextState = applyTripPlanViewError(getViewState(page), getTripPlanUserMessage(error));
+    setViewState(page, nextState);
+    // A failed replacement keeps the old immutable plan visible for retry.
+    syncPage(page, nextState, oldPlan);
+  }
+};
+
 Page<TripPlanPageData>({
   data: {
     tripId: '',
@@ -155,6 +252,7 @@ Page<TripPlanPageData>({
     allVersionLabels: [],
     readyVersionLabels: [],
     versionPickerIndex: 0,
+    regenerateInstructions: {},
   },
 
   onLoad(this: PageInstance<TripPlanPageData>, options: TripPlanRouteOptions): void {
@@ -203,6 +301,19 @@ Page<TripPlanPageData>({
       setViewState(this, state);
       syncPage(this, state, this.data.plan);
     }
+  },
+
+  onRegenerateInstructionInput(
+    this: PageInstance<TripPlanPageData>,
+    event: TripPlanPageEvent,
+  ): void {
+    updateDayInstruction(this, event);
+  },
+
+  onRegenerateDay(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    const dayNumber = dayNumberFromEvent(event);
+    if (dayNumber === undefined) return;
+    void regenerateDay(this, dayNumber);
   },
 
   onRetry(this: PageInstance<TripPlanPageData>): void {

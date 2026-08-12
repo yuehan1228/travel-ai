@@ -186,10 +186,21 @@ unavailable 路线作为交通耗时都会稳定失败。`climate_reference` 天
 快照或子表记录。读取始终带用户隔离条件，跨用户与不存在记录不可区分；最新列表只允许指向 ready 版本，并在读后通过
 共享 Schema 校验 `tripId`、版本和状态一致性。所有响应使用 Api Envelope，`x-request-id` 和 `requestId` 保持一致。
 
-小程序 `TripPlanService` 仅封装三个只读/生成调用，复用 `HttpClient`、`AuthService` 和共享 Zod Runtime Schema；
-无 Token 不发网络请求，认证失效清除本地 Token。TASK-017 API 本身不包含编辑、单日重生成、公开未认证分享、地图 UI、实时价格、
-Redis、队列或精确 TSP；小程序页面和生成体验属于 TASK-018。Migration 由 Drizzle Kit 生成并登记在 `apps/server/migrations/meta`，应用启动不自动
-执行；部署前必须人工审阅 `0005_trip_plan_versions.sql` 并显式运行 `db:migrate`。
+小程序 `TripPlanService` 封装生成、单日重生成和只读版本调用，复用 `HttpClient`、`AuthService` 和共享 Zod Runtime Schema；
+无 Token 不发网络请求，认证失效清除本地 Token。TASK-017 API 本身不包含编辑、公开未认证分享、地图 UI、实时价格、Redis、队列或精确 TSP；
+小程序页面和生成体验属于 TASK-018。Migration 由 Drizzle Kit 生成并登记在 `apps/server/migrations/meta`，应用启动不自动执行；部署前必须人工审阅
+`0005_trip_plan_versions.sql` 并显式运行 `db:migrate`。
+
+### TripPlan 单日重新生成（TASK-019）
+
+`POST /trips/:id/regenerate-day` 受 `AuthGuard` 保护，仅接受严格的
+`RegenerateTripPlanDayInput`（`sourceVersion`、`dayNumber` 为正安全整数，`instruction` 首尾 trim 后最多 500 字符，禁止额外字段）。
+服务端先按 `userId + tripId` 校验 Trip 和 `ready` 源版本，再确认目标日存在；上下文通过 Weather、Place、Route 和 RouteOrder 抽象读取，包含目标天气、已验证真实 POI/路线和相邻日快照，不接受客户端事实。
+`TripPlanGenerationService.regenerateDay` 对不可信的单日输出执行严格 `TripPlanDaySchema`、天气/路线/Place 白名单校验，并且每次只调用一次 LLM。
+
+单日操作与整单生成共用 Trip 行的原子 `generating` reservation，因此同一 Trip 不能并发生成；新完整快照在一个事务中写入递增版本，只有目标日替换，其余日、建议和提示保持不变，随后重算每日及分类/总预算并再次验证完整 `TripPlanSchema`。失败版本只保留 `failed` 元数据并恢复源版本的 `ready` 状态，旧版本的 JSON、日和条目行从不更新。读取和写入继续同时约束 `userId + tripId`，不存在或跨用户 Trip 使用 `TRIP_NOT_FOUND`；ready 源快照中不存在目标日时使用 `TRIP_PLAN_DAY_NOT_FOUND`，源版本非 ready 仍使用 `TRIP_PLAN_NOT_FOUND`。
+
+小程序详情页为每个 ready 日提供普通文本 instruction 输入和“重新生成本日”按钮；状态由单飞 guard 控制，成功切换到返回的新版本，失败保留旧快照并允许重试，`AUTH_TOKEN_INVALID` 仍由 `AuthService` 清理认证状态。该能力不引入 Redis、队列、编辑 API、地图或实时协作。
 
 ### 小程序 TripPlan 生成流程与只读详情（TASK-018）
 

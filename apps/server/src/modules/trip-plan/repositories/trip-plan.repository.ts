@@ -13,6 +13,7 @@ import type {
   TripPlanGenerationResult,
   TripPlanVersionStatus,
   TripPlanVersionSummary,
+  TripStatus,
 } from '@travel-guide/shared-types';
 
 import { DATABASE } from '../../../database/database.tokens';
@@ -44,12 +45,24 @@ export interface TripPlanGenerationReservation {
   readonly userId: string;
   readonly input: CreateTripInput;
   readonly createdAt: Date;
+  readonly operation?: 'generate' | 'regenerate-day';
+  readonly sourceVersion?: number;
+  readonly dayNumber?: number;
+  readonly instruction?: string;
+  readonly previousTripStatus?: TripStatus;
 }
 
 export type TripPlanGenerationReservationResult =
   | { readonly status: 'reserved'; readonly reservation: TripPlanGenerationReservation }
   | { readonly status: 'not_found' }
   | { readonly status: 'in_progress' };
+
+export type TripPlanDayRegenerationReservationResult =
+  | { readonly status: 'reserved'; readonly reservation: TripPlanGenerationReservation }
+  | { readonly status: 'not_found' }
+  | { readonly status: 'in_progress' }
+  | { readonly status: 'source_not_ready' }
+  | { readonly status: 'day_not_found' };
 
 /** Repository boundary for authenticated TripPlan version persistence. */
 export interface TripPlanRepository {
@@ -58,6 +71,16 @@ export interface TripPlanRepository {
     tripId: string,
     createdAt: Date,
   ): Promise<TripPlanGenerationReservationResult>;
+
+  /** Optional extension retained separately so existing generation fakes remain valid. */
+  reserveDayRegeneration?(
+    userId: string,
+    tripId: string,
+    sourceVersion: number,
+    dayNumber: number,
+    instruction: string | undefined,
+    createdAt: Date,
+  ): Promise<TripPlanDayRegenerationReservationResult>;
 
   saveReady(
     userId: string,
@@ -139,6 +162,12 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
   ): Promise<TripPlanGenerationReservationResult> {
     const database = this.requireDatabase();
     return database.transaction(async (tx) => {
+      const previousRows = await tx
+        .select({ status: trips.status })
+        .from(trips)
+        .where(and(eq(trips.id, tripId), eq(trips.userId, userId), isNull(trips.deletedAt)))
+        .limit(1);
+      const previousTripStatus = previousRows[0]?.status as TripStatus | undefined;
       const updated = await tx
         .update(trips)
         .set({ status: 'generating', updatedAt: createdAt })
@@ -167,7 +196,15 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
       const maxVersionRows = await tx
         .select({ maxVersion: sql<number | null>`max(${tripPlanVersions.version})` })
         .from(tripPlanVersions)
-        .where(eq(tripPlanVersions.tripId, tripId));
+        .innerJoin(trips, eq(trips.id, tripPlanVersions.tripId))
+        .where(
+          and(
+            eq(tripPlanVersions.tripId, tripId),
+            eq(trips.id, tripId),
+            eq(trips.userId, userId),
+            isNull(trips.deletedAt),
+          ),
+        );
       const currentMax = maxVersionRows[0]?.maxVersion;
       const version = currentMax === null || currentMax === undefined ? 1 : Number(currentMax) + 1;
       if (!Number.isSafeInteger(version) || version < 1 || version > 2_147_483_647) {
@@ -199,6 +236,127 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
           userId,
           input: CreateTripInputSchema.parse(trip.inputSnapshot),
           createdAt,
+          operation: 'generate',
+          ...(previousTripStatus === undefined ? {} : { previousTripStatus }),
+        },
+      };
+    });
+  }
+
+  public async reserveDayRegeneration(
+    userId: string,
+    tripId: string,
+    sourceVersion: number,
+    dayNumber: number,
+    instruction: string | undefined,
+    createdAt: Date,
+  ): Promise<TripPlanDayRegenerationReservationResult> {
+    const database = this.requireDatabase();
+    return database.transaction(async (tx) => {
+      const ownerRows = await tx
+        .select({ status: trips.status })
+        .from(trips)
+        .where(and(eq(trips.id, tripId), eq(trips.userId, userId), isNull(trips.deletedAt)))
+        .limit(1);
+      const owner = ownerRows[0];
+      if (owner === undefined) return { status: 'not_found' as const };
+      if (owner.status === 'generating') return { status: 'in_progress' as const };
+
+      const sourceRows = await tx
+        .select({ version: tripPlanVersions })
+        .from(tripPlanVersions)
+        .innerJoin(trips, eq(trips.id, tripPlanVersions.tripId))
+        .where(
+          and(
+            eq(tripPlanVersions.tripId, tripId),
+            eq(trips.id, tripId),
+            eq(trips.userId, userId),
+            isNull(trips.deletedAt),
+            eq(tripPlanVersions.version, sourceVersion),
+            eq(tripPlanVersions.status, 'ready'),
+          ),
+        )
+        .limit(1);
+      const source = sourceRows[0]?.version;
+      if (source === undefined) return { status: 'source_not_ready' as const };
+      const sourcePlan = parseStoredPlan(source.planSnapshot, 'ready');
+      if (sourcePlan === undefined) return { status: 'source_not_ready' as const };
+      if (!sourcePlan.days.some((day) => day.dayNumber === dayNumber)) {
+        return { status: 'day_not_found' as const };
+      }
+
+      const updated = await tx
+        .update(trips)
+        .set({ status: 'generating', updatedAt: createdAt })
+        .where(
+          and(
+            eq(trips.id, tripId),
+            eq(trips.userId, userId),
+            isNull(trips.deletedAt),
+            inArray(trips.status, ['draft', 'ready', 'failed']),
+          ),
+        )
+        .returning();
+      const trip = updated[0];
+      if (trip === undefined) {
+        const current = await tx
+          .select({ status: trips.status })
+          .from(trips)
+          .where(and(eq(trips.id, tripId), eq(trips.userId, userId), isNull(trips.deletedAt)))
+          .limit(1);
+        return current[0]?.status === 'generating'
+          ? ({ status: 'in_progress' } as const)
+          : ({ status: 'not_found' } as const);
+      }
+
+      const maxVersionRows = await tx
+        .select({ maxVersion: sql<number | null>`max(${tripPlanVersions.version})` })
+        .from(tripPlanVersions)
+        .innerJoin(trips, eq(trips.id, tripPlanVersions.tripId))
+        .where(
+          and(
+            eq(tripPlanVersions.tripId, tripId),
+            eq(trips.id, tripId),
+            eq(trips.userId, userId),
+            isNull(trips.deletedAt),
+          ),
+        );
+      const currentMax = maxVersionRows[0]?.maxVersion;
+      const version = currentMax === null || currentMax === undefined ? 1 : Number(currentMax) + 1;
+      if (!Number.isSafeInteger(version) || version < 1 || version > 2_147_483_647) {
+        throw new Error('TripPlan version overflow');
+      }
+
+      const versionId = randomUUID();
+      const inserted = await tx
+        .insert(tripPlanVersions)
+        .values({
+          id: versionId,
+          tripId,
+          version,
+          schemaVersion: '1.0',
+          status: 'generating',
+          planSnapshot: null,
+          generatedAt: null,
+          createdAt,
+        })
+        .returning();
+      if (inserted[0] === undefined) throw new Error('TripPlan version could not be reserved');
+
+      return {
+        status: 'reserved' as const,
+        reservation: {
+          versionId,
+          version,
+          tripId,
+          userId,
+          input: CreateTripInputSchema.parse(trip.inputSnapshot),
+          createdAt,
+          operation: 'regenerate-day' as const,
+          sourceVersion,
+          dayNumber,
+          ...(instruction === undefined ? {} : { instruction }),
+          previousTripStatus: owner.status as TripStatus,
         },
       };
     });
@@ -311,7 +469,13 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
 
       const trip = await tx
         .update(trips)
-        .set({ status: 'failed', updatedAt: failedAt })
+        .set({
+          status:
+            reservation.operation === 'regenerate-day' && reservation.previousTripStatus === 'ready'
+              ? 'ready'
+              : 'failed',
+          updatedAt: failedAt,
+        })
         .where(
           and(
             eq(trips.id, tripId),

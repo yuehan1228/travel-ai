@@ -141,3 +141,16 @@ export interface TripPlanGenerationResult {
   summary: TripPlanVersionSummary;
   tripId: string;
 }
+
+/** Strict request for replacing exactly one day from an immutable ready version. */
+export interface RegenerateTripPlanDayInput {
+  readonly sourceVersion: number;
+  readonly dayNumber: number;
+  readonly instruction?: string;
+}
+
+/** Result of a day regeneration; the returned plan is the complete new snapshot. */
+export interface RegenerateTripPlanDayResult extends TripPlanGenerationResult {
+  readonly sourceVersion: number;
+  readonly dayNumber: number;
+}

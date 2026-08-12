@@ -24,6 +24,19 @@ export const TRIP_PLAN_SYSTEM_PROMPT = [
   'Do not include supplier raw responses, credentials, tokens, internal database fields, or fields not defined by the schema.',
 ].join('\n');
 
+export const TRIP_PLAN_DAY_SYSTEM_PROMPT = [
+  `You are a travel itinerary day editor. Prompt contract: ${TRIP_PLAN_PROMPT_VERSION}.`,
+  'Return exactly one JSON object that conforms to the TripPlanDay contract.',
+  'Replace only the requested day. Preserve its date and dayNumber.',
+  'Use only verified POI, weather, and route facts supplied in the user context.',
+  'Never invent or alter a place id, providerPlaceId, provider, name, address, coordinates, rating, opening hours, route distance, route duration, toll, weather measurement, or data source.',
+  'Keep times ordered without overlap and keep the day budget equal to its item costs.',
+  'Use warnings when verified information is missing instead of guessing.',
+].join('\n');
+
 if (TRIP_PLAN_SYSTEM_PROMPT.length > MAX_TRIP_PLAN_SYSTEM_PROMPT_LENGTH) {
   throw new Error('TripPlan system prompt exceeds its safety length limit');
+}
+if (TRIP_PLAN_DAY_SYSTEM_PROMPT.length > MAX_TRIP_PLAN_SYSTEM_PROMPT_LENGTH) {
+  throw new Error('TripPlan day system prompt exceeds its safety length limit');
 }

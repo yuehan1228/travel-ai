@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   GenerateTripPlanInputSchema,
+  RegenerateTripPlanDayInputSchema,
+  RegenerateTripPlanDayResultSchema,
   TripPlanGenerationResultSchema,
   TripPlanVersionListResultSchema,
   TripPlanVersionSummarySchema,
@@ -27,6 +29,40 @@ describe('TripPlan version contracts', () => {
     expect(GenerateTripPlanInputSchema.safeParse({ model: 'gpt' }).success).toBe(false);
     expect(GenerateTripPlanInputSchema.safeParse({ provider: 'secret' }).success).toBe(false);
     expect(GenerateTripPlanInputSchema.safeParse({ places: [] }).success).toBe(false);
+  });
+
+  it('normalizes strict single-day regeneration input', () => {
+    expect(
+      RegenerateTripPlanDayInputSchema.parse({
+        sourceVersion: 2,
+        dayNumber: 3,
+        instruction: '  更轻松一些  ',
+      }),
+    ).toEqual({ sourceVersion: 2, dayNumber: 3, instruction: '更轻松一些' });
+    expect(RegenerateTripPlanDayInputSchema.parse({ sourceVersion: 1, dayNumber: 1 })).toEqual({
+      sourceVersion: 1,
+      dayNumber: 1,
+    });
+    expect(
+      RegenerateTripPlanDayInputSchema.safeParse({
+        sourceVersion: 0,
+        dayNumber: 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      RegenerateTripPlanDayInputSchema.safeParse({
+        sourceVersion: 1,
+        dayNumber: 1,
+        instruction: 'x'.repeat(501),
+      }).success,
+    ).toBe(false);
+    expect(
+      RegenerateTripPlanDayInputSchema.safeParse({
+        sourceVersion: 1,
+        dayNumber: 1,
+        extra: true,
+      }).success,
+    ).toBe(false);
   });
 
   it('validates UUIDs, positive integer versions and strict summaries', () => {
@@ -67,6 +103,21 @@ describe('TripPlan version contracts', () => {
         items: [readySummary, readySummary],
         latestVersion: 1,
       }).success,
+    ).toBe(false);
+  });
+
+  it('keeps day regeneration results strict and tied to their summary', () => {
+    const result = {
+      version: 2,
+      status: 'failed' as const,
+      summary: { ...summary, version: 2 },
+      tripId,
+      sourceVersion: 1,
+      dayNumber: 2,
+    };
+    expect(RegenerateTripPlanDayResultSchema.safeParse(result).success).toBe(true);
+    expect(
+      RegenerateTripPlanDayResultSchema.safeParse({ ...result, unexpected: true }).success,
     ).toBe(false);
   });
 });

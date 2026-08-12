@@ -1,6 +1,7 @@
 import {
   TripIdSchema,
   TripPlanGenerationResultSchema,
+  RegenerateTripPlanDayResultSchema,
   TripPlanSchema,
   TripPlanVersionListResultSchema,
 } from '@travel-guide/shared-schemas';
@@ -12,6 +13,7 @@ import type {
   RouteEstimate,
   TripPlan,
   TripPlanGenerationResult,
+  RegenerateTripPlanDayResult,
   TripPlanItem,
   TripPlanItemType,
   TripPlanVersionListResult,
@@ -100,6 +102,7 @@ export interface TripPlanViewState {
   readonly latestVersion?: number;
   readonly selectedVersion?: number;
   readonly isSwitching: boolean;
+  readonly regeneratingDay?: number;
   readonly errorMessage: string;
 }
 
@@ -130,6 +133,7 @@ export const createTripPlanViewState = (tripId: string): TripPlanViewState => ({
   allVersions: [],
   readyVersions: [],
   isSwitching: false,
+  regeneratingDay: undefined,
   errorMessage: '',
 });
 
@@ -167,18 +171,44 @@ export const parseTripPlanVersionResult = (value: unknown): TripPlanGenerationRe
   return parsed.data;
 };
 
+export const parseTripPlanDayRegenerationResult = (value: unknown): RegenerateTripPlanDayResult => {
+  const parsed = RegenerateTripPlanDayResultSchema.safeParse(value);
+  if (!parsed.success || (parsed.data.status === 'ready' && parsed.data.plan === undefined)) {
+    throw invalidTripPlanResponse();
+  }
+
+  return parsed.data;
+};
+
 export const beginTripPlanLoad = (state: TripPlanViewState): TripPlanViewState => ({
   ...state,
   status: 'loading',
   isSwitching: false,
+  regeneratingDay: undefined,
   errorMessage: '',
 });
 
 export const beginTripPlanVersionSwitch = (state: TripPlanViewState): TripPlanViewState => ({
   ...state,
   isSwitching: true,
+  regeneratingDay: undefined,
   errorMessage: '',
 });
+
+export const beginTripPlanDayRegeneration = (
+  state: TripPlanViewState,
+  dayNumber: number,
+): TripPlanViewState =>
+  state.regeneratingDay === undefined &&
+  Number.isSafeInteger(dayNumber) &&
+  dayNumber >= 1 &&
+  dayNumber <= 14
+    ? {
+        ...state,
+        regeneratingDay: dayNumber,
+        errorMessage: '',
+      }
+    : state;
 
 export const applyLatestTripPlanResult = (
   state: TripPlanViewState,
@@ -197,6 +227,7 @@ export const applyLatestTripPlanResult = (
     latestVersion: parsed.latestVersion,
     selectedVersion: parsed.latestVersion,
     isSwitching: false,
+    regeneratingDay: undefined,
     errorMessage: hasPlan ? '' : '暂时没有可用攻略。',
   };
 };
@@ -221,6 +252,38 @@ export const applyTripPlanVersionResult = (
     plan: parsed.plan,
     selectedVersion: parsed.version,
     isSwitching: false,
+    regeneratingDay: undefined,
+    errorMessage: '',
+  };
+};
+
+/** Apply a ready day replacement while keeping the complete new immutable plan. */
+export const applyTripPlanDayRegenerationResult = (
+  state: TripPlanViewState,
+  result: RegenerateTripPlanDayResult,
+): TripPlanViewState => {
+  const parsed = parseTripPlanDayRegenerationResult(result);
+  if (parsed.status !== 'ready' || parsed.plan === undefined) {
+    return {
+      ...state,
+      regeneratingDay: undefined,
+      errorMessage: '本日攻略尚未准备好，仍显示当前攻略。',
+    };
+  }
+  const allVersions = getVisibleTripPlanVersions([
+    parsed.summary,
+    ...state.allVersions.filter((item) => item.version !== parsed.version),
+  ]);
+  return {
+    ...state,
+    status: 'ready',
+    plan: parsed.plan,
+    allVersions,
+    readyVersions: getReadyTripPlanVersions(allVersions),
+    latestVersion: parsed.version,
+    selectedVersion: parsed.version,
+    isSwitching: false,
+    regeneratingDay: undefined,
     errorMessage: '',
   };
 };
@@ -233,6 +296,7 @@ export const applyTripPlanViewError = (
   ...state,
   status: state.plan === undefined ? 'error' : 'ready',
   isSwitching: false,
+  regeneratingDay: undefined,
   errorMessage,
 });
 
@@ -252,6 +316,9 @@ export const getTripPlanUserMessage = (error: unknown): string => {
       return '未找到该旅行需求，请返回重新开始。';
     case 'TRIP_PLAN_NOT_FOUND':
       return '暂时没有可用攻略。';
+    case 'TRIP_PLAN_DAY_NOT_FOUND':
+    case 'TRIP_PLAN_SOURCE_VERSION_NOT_READY':
+      return '该版本或日期不可用，请重新加载攻略。';
     case 'TRIP_PLAN_GENERATION_IN_PROGRESS':
       return '攻略正在生成中，请稍候再试。';
     case 'TRIP_PLAN_VALIDATION_ERROR':

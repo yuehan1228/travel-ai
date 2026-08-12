@@ -38,6 +38,27 @@
         </view>
         <text class="day-summary">{{item.summary}}</text>
 
+        <view class="day-regenerate-card">
+          <text class="block-label">调整本日安排</text>
+          <input
+            class="day-regenerate-input"
+            data-day-number="{{item.dayNumber}}"
+            value="{{item.regenerateInstruction}}"
+            maxlength="500"
+            placeholder="可选：告诉我们希望如何调整"
+            bindinput="onRegenerateInstructionInput"
+            disabled="{{regeneratingDay !== undefined}}"
+          />
+          <button
+            class="day-regenerate-button"
+            size="mini"
+            data-day-number="{{item.dayNumber}}"
+            bindtap="onRegenerateDay"
+            loading="{{item.isRegenerating}}"
+            disabled="{{regeneratingDay !== undefined}}"
+          >重新生成本日</button>
+        </view>
+
         <view class="weather-card">
           <view class="weather-heading">
             <text class="subsection-title">天气</text>

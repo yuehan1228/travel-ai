@@ -3,6 +3,7 @@ import { ApiBusinessException } from '../../http/api-business.exception';
 export const TRIP_PLAN_ERROR_CODES = [
   'TRIP_NOT_FOUND',
   'TRIP_PLAN_NOT_FOUND',
+  'TRIP_PLAN_DAY_NOT_FOUND',
   'TRIP_PLAN_GENERATION_IN_PROGRESS',
   'TRIP_PLAN_VALIDATION_ERROR',
   'TRIP_PLAN_PROVIDER_ERROR',

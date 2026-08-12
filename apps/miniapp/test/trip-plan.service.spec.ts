@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type {
   GenerateTripPlanInput,
+  RegenerateTripPlanDayResult,
   TripPlanGenerationResult,
   TripPlanVersionListResult,
   TripPlanVersionSummary,
@@ -73,6 +74,11 @@ const listResult: TripPlanVersionListResult = {
   latestVersion: 1,
   plan,
 };
+const dayRegenerationResult: RegenerateTripPlanDayResult = {
+  ...generationResult,
+  sourceVersion: 1,
+  dayNumber: 1,
+};
 
 const createAuth = (token: string | undefined): TripPlanAuthService & { loggedOut: boolean } => {
   const auth = {
@@ -99,6 +105,7 @@ describe('miniapp TripPlanService', () => {
       { success: true, data: generationResult, requestId: 'plan-1' },
       { success: true, data: listResult, requestId: 'plan-2' },
       { success: true, data: generationResult, requestId: 'plan-3' },
+      { success: true, data: dayRegenerationResult, requestId: 'plan-4' },
     ];
     const service = new TripPlanService(
       createClient(async (options) => {
@@ -118,13 +125,22 @@ describe('miniapp TripPlanService', () => {
     );
     await expect(service.getLatestTripPlan(tripId)).resolves.toEqual(listResult);
     await expect(service.getTripPlanVersion(tripId, 1)).resolves.toEqual(generationResult);
+    await expect(
+      service.regenerateTripPlanDay(tripId, {
+        sourceVersion: 1,
+        dayNumber: 1,
+        instruction: '  更轻松  ',
+      }),
+    ).resolves.toEqual(dayRegenerationResult);
     expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
       'POST https://api.example.invalid/trips/123e4567-e89b-12d3-a456-426614174000/generate',
       'GET https://api.example.invalid/trips/123e4567-e89b-12d3-a456-426614174000/plan',
       'GET https://api.example.invalid/trips/123e4567-e89b-12d3-a456-426614174000/plan/1',
+      'POST https://api.example.invalid/trips/123e4567-e89b-12d3-a456-426614174000/regenerate-day',
     ]);
     expect(requests.every((request) => request.authorization === 'Bearer plan-token')).toBe(true);
     expect(requests[0]?.data).toEqual({});
+    expect(requests[3]?.data).toEqual({ sourceVersion: 1, dayNumber: 1, instruction: '更轻松' });
   });
 
   it('does not access network without a token and validates UUID/version locally', async () => {

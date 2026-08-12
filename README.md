@@ -106,7 +106,7 @@ Prompt、天气或 POI。读取使用 `GET /trips/:id/plan`（版本摘要及最
 `generating`；并发请求返回 `TRIP_PLAN_GENERATION_IN_PROGRESS`。成功事务同时写入
 `trip_plan_versions`、`trip_plan_days` 和 `trip_plan_items` 并切换为 `ready`；失败事务切换为 `failed`，不保存
 部分 Plan 快照，版本号按 Trip 递增且不可修改。所有读取和写入同时带 `userId` 与 `tripId`，跨用户和不存在的
-Trip/版本使用统一的脱敏错误。稳定错误包括 `TRIP_NOT_FOUND`、`TRIP_PLAN_NOT_FOUND`、
+Trip/版本使用统一的脱敏错误。稳定错误包括 `TRIP_NOT_FOUND`、`TRIP_PLAN_NOT_FOUND`、`TRIP_PLAN_DAY_NOT_FOUND`、
 `TRIP_PLAN_GENERATION_IN_PROGRESS`、`TRIP_PLAN_VALIDATION_ERROR`、`TRIP_PLAN_PROVIDER_ERROR`、
 `TRIP_PLAN_OUTPUT_INVALID`、`TRIP_PLAN_ENTITY_MISMATCH`、`TRIP_PLAN_UNAVAILABLE` 和
 `TRIP_PLAN_PERSISTENCE_ERROR`。
@@ -128,7 +128,17 @@ Trip/版本使用统一的脱敏错误。稳定错误包括 `TRIP_NOT_FOUND`、`
 时间线、地点、路线、费用、提示和提醒，以及住宿、餐饮、交通、通用提示和分类预算。`forecast`、`climate_reference`、
 `unavailable` 分别按预报、历史气候参考和无可靠数据展示；缺失或不可用路线不填充距离、时长或费用，不使用 `rich-text`。
 历史版本最多保留 100 条摘要（包括 `generating`、`failed` 和 `ready`）；只有 `ready` 版本可切换并渲染，切换失败时保留当前已显示的攻略。页面参数也经过 UUID/版本 Schema 校验，认证令牌
-仍只由 `AuthService` 管理。TASK-018 不包含攻略编辑、单日重生成、替换地点、聊天、地图、分享、实时价格或协作功能。
+仍只由 `AuthService` 管理。TASK-018 本身不包含攻略编辑、单日重生成、替换地点、聊天、地图、分享、实时价格或协作功能。
+
+### TripPlan 单日重新生成（TASK-019）
+
+服务端新增受认证的 `POST /trips/:id/regenerate-day`。请求体严格限制为
+`{ sourceVersion, dayNumber, instruction? }`：版本和日号是正安全整数，instruction 会去除首尾空白并限制为 500 字符，额外字段一律拒绝。
+源版本必须属于当前用户且为 `ready`，目标日必须存在；天气、真实 POI、路线和相邻日上下文均由服务端通过既有抽象组装，客户端不能提交或伪造事实。
+单日生成只调用一次可替换的 LLM，并在 Schema 和真实实体白名单校验后，仅替换目标日，重新计算每日及总预算。
+
+单日重生成与整单生成共享 Trip 行级原子状态和版本号 reservation，同一旅行需求同时只能有一个操作。成功在事务中保存完整新快照并递增版本；失败只保留 `failed` 元数据并恢复原有 `ready` 状态，旧版本及其日/条目快照不可变。
+跨用户或不存在的 Trip 统一返回 `TRIP_NOT_FOUND`，其他稳定 TripPlan 错误码沿用生成 API。小程序 `TripPlanService.regenerateTripPlanDay` 和只读详情页的每日按钮支持可选 instruction、单飞 loading、失败重试；成功切换到新版本，失败保留旧攻略，认证失效时清理 Token。仍不引入 Redis、队列、攻略编辑或实时协作。
 
 访问顺序建议使用需要认证的 `POST /routes/order`，在真实路线矩阵上运行确定性的最近邻（nearest-neighbor）贪心算法。
 请求可指定 `startId` 和 `endId`；未指定起点时按点 ID 字典序选择，候选路线按预计耗时、距离和目标 ID 依次打破平局，

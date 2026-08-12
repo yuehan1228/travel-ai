@@ -15,6 +15,8 @@ import {
   type TripPlanWarning,
   type TripPlanWarningSeverity,
   type GenerateTripPlanInput,
+  type RegenerateTripPlanDayInput,
+  type RegenerateTripPlanDayResult,
   type TripPlanGenerationResult,
   type TripPlanVersionListResult,
   type TripPlanVersionStatus,
@@ -24,7 +26,10 @@ import {
 
 import { PlaceSchema } from './place.schema';
 import { RouteEstimateSchema } from './route.schema';
-import { createTrimmedRequiredStringSchema } from './common.schema';
+import {
+  createOptionalTrimmedStringSchema,
+  createTrimmedRequiredStringSchema,
+} from './common.schema';
 import { IsoDateSchema } from './trip-input.schema';
 import { DailyWeatherSchema } from './weather.schema';
 
@@ -605,6 +610,98 @@ export const TripPlanGenerationResultSchema: z.ZodType<
     plan: TripPlanSchema.optional(),
     summary: TripPlanVersionSummarySchema,
     tripId: z.string().uuid(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.summary.version !== value.version) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['version'],
+        message: 'version must match summary.version',
+      });
+    }
+    if (value.summary.status !== value.status) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['status'],
+        message: 'status must match summary.status',
+      });
+    }
+    if (value.summary.tripId !== value.tripId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['tripId'],
+        message: 'tripId must match summary.tripId',
+      });
+    }
+    if (value.plan !== undefined && value.plan.tripId !== value.tripId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan', 'tripId'],
+        message: 'plan.tripId must match tripId',
+      });
+    }
+    if (
+      value.plan !== undefined &&
+      value.summary.generatedAt !== undefined &&
+      value.plan.generatedAt !== value.summary.generatedAt
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan', 'generatedAt'],
+        message: 'plan.generatedAt must match summary.generatedAt',
+      });
+    }
+    if (value.status === 'ready' && value.plan === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan'],
+        message: 'ready results must contain a plan',
+      });
+    }
+    if (value.status !== 'ready' && value.plan !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan'],
+        message: 'non-ready results must not contain a plan',
+      });
+    }
+  });
+
+const positiveSafeIntegerSchema = z
+  .number({ invalid_type_error: 'value must be a number' })
+  .finite({ message: 'value must be finite' })
+  .int({ message: 'value must be an integer' })
+  .min(1, { message: 'value must be at least 1' })
+  .max(2_147_483_647, { message: 'value is too large' });
+
+/** Strict, normalized request body for POST /trips/:id/regenerate-day. */
+export const RegenerateTripPlanDayInputSchema: z.ZodType<
+  RegenerateTripPlanDayInput,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    sourceVersion: positiveSafeIntegerSchema,
+    dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
+    instruction: createOptionalTrimmedStringSchema('instruction', 500),
+  })
+  .strict();
+
+/** Complete immutable replacement version returned by the day endpoint. */
+export const RegenerateTripPlanDayResultSchema: z.ZodType<
+  RegenerateTripPlanDayResult,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    version: positiveSafeIntegerSchema,
+    status: TripPlanVersionStatusSchema,
+    plan: TripPlanSchema.optional(),
+    summary: TripPlanVersionSummarySchema,
+    tripId: z.string().uuid(),
+    sourceVersion: positiveSafeIntegerSchema,
+    dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
   })
   .strict()
   .superRefine((value, context) => {

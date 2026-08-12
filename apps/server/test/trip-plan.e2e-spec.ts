@@ -8,6 +8,7 @@ import {
   createApiSuccessSchema,
   PlaceSchema,
   TripPlanGenerationResultSchema,
+  RegenerateTripPlanDayResultSchema,
   TripPlanSchema,
   TripPlanVersionListResultSchema,
 } from '@travel-guide/shared-schemas';
@@ -565,5 +566,30 @@ describe('TripPlan API boundary', () => {
 
   it('keeps the existing trip input schema strict at the test boundary', () => {
     expect(CreateTripInputSchema.safeParse(tripInput).success).toBe(true);
+  });
+
+  it('regenerates one day through the authenticated API and returns a new version', async () => {
+    const token = await login();
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: `/trips/${validTripId}/regenerate-day`,
+        headers: { authorization: `Bearer ${token}` },
+        payload: { sourceVersion: 1, dayNumber: 1, instruction: '  更轻松  ' },
+      });
+
+    expect(response.statusCode).toBe(200);
+    const envelope = createApiSuccessSchema(RegenerateTripPlanDayResultSchema).parse(
+      JSON.parse(response.payload),
+    );
+    expect(envelope.data).toMatchObject({
+      sourceVersion: 1,
+      dayNumber: 1,
+      version: 2,
+      status: 'ready',
+    });
+    expect(envelope.data.plan?.days).toHaveLength(3);
   });
 });

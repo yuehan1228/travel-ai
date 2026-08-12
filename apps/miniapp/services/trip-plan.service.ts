@@ -1,11 +1,15 @@
 import {
   GenerateTripPlanInputSchema,
+  RegenerateTripPlanDayInputSchema,
+  RegenerateTripPlanDayResultSchema,
   TripIdSchema,
   TripPlanGenerationResultSchema,
   TripPlanVersionListResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
   GenerateTripPlanInput,
+  RegenerateTripPlanDayInput,
+  RegenerateTripPlanDayResult,
   TripPlanGenerationResult,
   TripPlanVersionListResult,
 } from '@travel-guide/shared-types';
@@ -59,6 +63,40 @@ export class TripPlanService {
       method: 'GET',
       path: `/trips/${encodeURIComponent(tripId)}/plan/${parsedVersion}`,
       schema: TripPlanGenerationResultSchema,
+    });
+  }
+
+  public async regenerateTripPlanDay(
+    id: string,
+    input: RegenerateTripPlanDayInput,
+  ): Promise<RegenerateTripPlanDayResult>;
+  public async regenerateTripPlanDay(
+    id: string,
+    sourceVersion: number,
+    dayNumber: number,
+    instruction?: string,
+  ): Promise<RegenerateTripPlanDayResult>;
+  public async regenerateTripPlanDay(
+    id: string,
+    inputOrSourceVersion: RegenerateTripPlanDayInput | number,
+    dayNumber?: number,
+    instruction?: string,
+  ): Promise<RegenerateTripPlanDayResult> {
+    const tripId = TripIdSchema.parse(id);
+    const input: RegenerateTripPlanDayInput =
+      typeof inputOrSourceVersion === 'number'
+        ? {
+            sourceVersion: inputOrSourceVersion,
+            dayNumber: dayNumber ?? 0,
+            ...(instruction === undefined ? {} : { instruction }),
+          }
+        : inputOrSourceVersion;
+    const parsedInput = RegenerateTripPlanDayInputSchema.parse(input);
+    return this.request<RegenerateTripPlanDayResult>({
+      method: 'POST',
+      path: `/trips/${encodeURIComponent(tripId)}/regenerate-day`,
+      data: parsedInput,
+      schema: RegenerateTripPlanDayResultSchema,
     });
   }
 

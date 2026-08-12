@@ -4,7 +4,12 @@ export {
   TRIP_PLAN_PROMPT_SCHEMA_NAME,
   TRIP_PLAN_PROMPT_VERSION,
 } from './trip-plan.prompt-version';
-export { TRIP_PLAN_SYSTEM_PROMPT } from './trip-plan.system.prompt';
-export { buildTripPlanUserPrompt, type TripPlanPromptContext } from './trip-plan.user.prompt';
+export { TRIP_PLAN_DAY_SYSTEM_PROMPT, TRIP_PLAN_SYSTEM_PROMPT } from './trip-plan.system.prompt';
+export {
+  buildTripPlanDayUserPrompt,
+  buildTripPlanUserPrompt,
+  type TripPlanDayPromptContext,
+  type TripPlanPromptContext,
+} from './trip-plan.user.prompt';
 
 export const PROMPTS_PACKAGE_VERSION = '0.1.0';

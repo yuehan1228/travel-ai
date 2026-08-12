@@ -14,6 +14,8 @@ import type { FastifyRequest } from 'fastify';
 
 import {
   GenerateTripPlanInputSchema,
+  RegenerateTripPlanDayInputSchema,
+  RegenerateTripPlanDayResultSchema,
   TripIdSchema,
   TripPlanGenerationResultSchema,
   TripPlanVersionListResultSchema,
@@ -21,6 +23,8 @@ import {
 import type {
   ApiSuccess,
   GenerateTripPlanInput,
+  RegenerateTripPlanDayInput,
+  RegenerateTripPlanDayResult,
   TripPlanGenerationResult,
   TripPlanVersionListResult,
 } from '@travel-guide/shared-types';
@@ -77,6 +81,27 @@ export class TripPlanController {
     return { success: true, data: validated.data, requestId: requestIdFor(request) };
   }
 
+  @Post(':id/regenerate-day')
+  @HttpCode(HttpStatus.OK)
+  public async regenerateDay(
+    @Param('id') tripId: string,
+    @Body() body: unknown,
+    @CurrentUserId() userId: string,
+    @Req() request: FastifyRequest,
+  ): Promise<ApiSuccess<RegenerateTripPlanDayResult>> {
+    const parsedBody = RegenerateTripPlanDayInputSchema.safeParse(body);
+    if (!parsedBody.success) throw validationError();
+    const result = await this.service.regenerateDay(userId, parseTripId(tripId), parsedBody.data);
+    const validated = RegenerateTripPlanDayResultSchema.safeParse(result);
+    if (!validated.success)
+      throw new TripPlanException(
+        'TRIP_PLAN_PERSISTENCE_ERROR',
+        500,
+        'TripPlan data could not be persisted',
+      );
+    return { success: true, data: validated.data, requestId: requestIdFor(request) };
+  }
+
   @Get(':id/plan')
   @HttpCode(HttpStatus.OK)
   public async getLatest(
@@ -119,4 +144,4 @@ export class TripPlanController {
   }
 }
 
-export type { GenerateTripPlanInput };
+export type { GenerateTripPlanInput, RegenerateTripPlanDayInput };
