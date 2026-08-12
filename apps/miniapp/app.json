@@ -1,5 +1,5 @@
 {
-  "pages": ["pages/index/index"],
+  "pages": ["pages/index/index", "pages/trip-generating/index", "pages/trip-plan/index"],
   "window": {
     "navigationBarTitleText": "AI 智能旅游攻略",
     "navigationBarBackgroundColor": "#ffffff",

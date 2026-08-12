@@ -1,0 +1,277 @@
+.page {
+  box-sizing: border-box;
+  min-height: 100vh;
+  padding: 28rpx 24rpx 72rpx;
+  background: #f7f8fa;
+}
+
+.header-card,
+.version-card,
+.section-card,
+.loading-card,
+.empty-card,
+.message {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 30rpx 26rpx;
+  background: #ffffff;
+  border-radius: 20rpx;
+  box-shadow: 0 8rpx 28rpx rgba(31, 41, 55, 0.06);
+}
+
+.version-card,
+.section-card,
+.loading-card,
+.empty-card,
+.message {
+  margin-top: 20rpx;
+}
+
+.eyebrow,
+.source-tag,
+.item-type {
+  color: #2563eb;
+  font-size: 23rpx;
+}
+
+.title {
+  display: block;
+  margin-top: 12rpx;
+  color: #111827;
+  font-size: 38rpx;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.traveler,
+.muted {
+  display: block;
+  margin-top: 10rpx;
+  color: #6b7280;
+  font-size: 24rpx;
+}
+
+.header-meta {
+  display: flex;
+  margin-top: 18rpx;
+  flex-direction: column;
+  gap: 8rpx;
+  color: #4b5563;
+  font-size: 24rpx;
+  line-height: 1.5;
+}
+
+.summary,
+.day-summary,
+.item-description,
+.item-reason,
+.recommendation-card > text,
+.tip,
+.warning {
+  display: block;
+  margin-top: 14rpx;
+  color: #374151;
+  font-size: 27rpx;
+  line-height: 1.6;
+}
+
+.section-title {
+  display: block;
+  color: #111827;
+  font-size: 31rpx;
+  font-weight: 600;
+}
+
+.version-picker {
+  margin-top: 20rpx;
+  padding: 20rpx;
+  color: #1f2937;
+  background: #f9fafb;
+  border-radius: 12rpx;
+  font-size: 27rpx;
+}
+
+.version-status-row {
+  display: flex;
+  margin-top: 16rpx;
+  align-items: center;
+  justify-content: space-between;
+  color: #374151;
+  font-size: 25rpx;
+}
+
+.version-status {
+  color: #6b7280;
+}
+
+.chevron {
+  float: right;
+  color: #6b7280;
+}
+
+.switching {
+  display: block;
+  margin-top: 12rpx;
+  color: #6b7280;
+  font-size: 23rpx;
+}
+
+.day-card {
+  margin-top: 28rpx;
+  padding-top: 26rpx;
+  border-top: 1rpx solid #e5e7eb;
+}
+
+.day-heading,
+.weather-heading,
+.item-heading,
+.budget-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.day-number,
+.item-name,
+.recommendation-name {
+  color: #111827;
+  font-size: 29rpx;
+  font-weight: 600;
+}
+
+.day-date {
+  color: #6b7280;
+  font-size: 25rpx;
+}
+
+.weather-card {
+  margin-top: 22rpx;
+  padding: 22rpx;
+  background: #eff6ff;
+  border-radius: 14rpx;
+}
+
+.subsection-title,
+.block-label {
+  color: #374151;
+  font-size: 25rpx;
+  font-weight: 600;
+}
+
+.weather-condition,
+.weather-detail {
+  display: inline-block;
+  margin-top: 14rpx;
+  margin-right: 18rpx;
+  color: #1f2937;
+  font-size: 27rpx;
+}
+
+.weather-notice {
+  display: block;
+  margin-top: 14rpx;
+  color: #92400e;
+  font-size: 24rpx;
+  line-height: 1.5;
+}
+
+.timeline {
+  margin-top: 28rpx;
+}
+
+.timeline-item {
+  display: flex;
+  margin-top: 24rpx;
+}
+
+.timeline-time {
+  display: flex;
+  width: 100rpx;
+  padding-top: 2rpx;
+  flex-direction: column;
+  color: #2563eb;
+  font-size: 23rpx;
+  line-height: 1.6;
+}
+
+.timeline-content {
+  box-sizing: border-box;
+  min-width: 0;
+  padding-left: 20rpx;
+  flex: 1;
+  border-left: 4rpx solid #bfdbfe;
+}
+
+.item-type {
+  margin-right: 12rpx;
+}
+
+.item-cost,
+.day-cost {
+  display: block;
+  margin-top: 14rpx;
+  color: #047857;
+  font-size: 25rpx;
+}
+
+.place-block,
+.route-block,
+.tips-block,
+.warnings-block {
+  margin-top: 18rpx;
+  padding: 16rpx 18rpx;
+  background: #f9fafb;
+  border-radius: 12rpx;
+}
+
+.place-block > text,
+.route-block > text,
+.tips-block > text {
+  display: block;
+  margin-top: 8rpx;
+  font-size: 24rpx;
+  line-height: 1.5;
+}
+
+.warnings-block {
+  background: #fffbeb;
+}
+
+.warning {
+  color: #92400e;
+}
+
+.recommendation-card {
+  margin-top: 20rpx;
+  padding: 20rpx;
+  background: #f9fafb;
+  border-radius: 14rpx;
+}
+
+.recommendation-card .place-block {
+  background: #ffffff;
+}
+
+.budget-row {
+  margin-top: 18rpx;
+  color: #374151;
+  font-size: 27rpx;
+}
+
+.empty-line {
+  margin-top: 20rpx;
+}
+
+.error-message {
+  color: #b91c1c;
+  line-height: 1.6;
+}
+
+.retry-button {
+  width: 100%;
+  margin-top: 18rpx;
+}
+
+.last-card {
+  margin-bottom: 0;
+}

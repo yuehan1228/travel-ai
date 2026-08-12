@@ -91,7 +91,8 @@ Structured Output 与小程序 Runtime 校验；Schema 只能校验来源字段�
 `TripPlanGenerationService`、可替换 `LLMProvider`、Fake Provider 和版本化 Prompt；服务只接受经过严格
 校验的天气、POI 和路线 Context，最多向模型提供 30 个候选 POI，并在返回后再次校验 TripPlan、Place、RouteEstimate
 和天气白名单。OpenAI-compatible Provider 只从服务端 `LLM_*` 配置读取 Host、API Key 和模型，设置请求超时，供应商
-原始响应和 Prompt 不写入日志；测试只使用 Fake Provider。当前仍不包含攻略生成接口、数据库表或攻略页面。
+原始响应和 Prompt 不写入日志；测试只使用 Fake Provider。TASK-016 本身不注册 HTTP 生成接口；后续 TASK-017 接入了版本化生成 API，
+TASK-018 再接入小程序生成流程和只读攻略页面。
 
 ### TripPlan 生成 API（TASK-017）
 
@@ -115,6 +116,19 @@ Trip/版本使用统一的脱敏错误。稳定错误包括 `TRIP_NOT_FOUND`、`
 `pnpm --filter @travel-guide/server db:migrate`。小程序仅提供类型安全的
 `generateTripPlan`、`getLatestTripPlan`、`getTripPlanVersion` 服务，复用 HTTP/Auth/Bearer 和共享 Schema；缺少 Token
 不会联网，`AUTH_TOKEN_INVALID` 会清理认证状态。不新增攻略编辑、单日重生成、页面、地图 UI、实时价格或精确 TSP。
+
+### 小程序 TripPlan 生成与只读详情（TASK-018）
+
+小程序首页提交顺序为“表单校验 → 登录检查 → `CreateTripInputSchema` → 保存本地草稿 →
+`POST /trips` → 进入生成页”。创建或生成失败不会清除草稿；提交按钮和生成请求均有重复保护。
+生成页按“正在准备旅行需求、正在查询天气、正在筛选景点、正在规划路线、正在生成攻略、正在保存攻略”六阶段循环展示体验文案，只表示当前工作阶段，不伪造百分比或完成状态；页面卸载、成功和失败都会清理
+定时器。服务返回 `generating`、认证失效或稳定错误码时分别显示等待、重新登录或可重试的中文提示。
+
+`pages/trip-plan/index` 是只读攻略详情页：所有响应先通过严格 `TripPlanSchema`/版本 Schema，再渲染头部、每日天气、
+时间线、地点、路线、费用、提示和提醒，以及住宿、餐饮、交通、通用提示和分类预算。`forecast`、`climate_reference`、
+`unavailable` 分别按预报、历史气候参考和无可靠数据展示；缺失或不可用路线不填充距离、时长或费用，不使用 `rich-text`。
+历史版本最多保留 100 条摘要（包括 `generating`、`failed` 和 `ready`）；只有 `ready` 版本可切换并渲染，切换失败时保留当前已显示的攻略。页面参数也经过 UUID/版本 Schema 校验，认证令牌
+仍只由 `AuthService` 管理。TASK-018 不包含攻略编辑、单日重生成、替换地点、聊天、地图、分享、实时价格或协作功能。
 
 访问顺序建议使用需要认证的 `POST /routes/order`，在真实路线矩阵上运行确定性的最近邻（nearest-neighbor）贪心算法。
 请求可指定 `startId` 和 `endId`；未指定起点时按点 ID 字典序选择，候选路线按预计耗时、距离和目标 ID 依次打破平局，
@@ -179,8 +193,8 @@ Zod 的浏览器可用运行时代码复制到被忽略的 `apps/miniapp/minipro
 代码打入小程序。依赖或共享 Schema 变更后需重新执行该命令。
 
 首页目前提供项目名称、当前环境、旅行需求表单、本地草稿保存和“检查服务状态”按钮。
-表单只在本地校验并保存草稿，当前不会调用 `POST /trips`；新增的小程序 Trip Service
-仅为后续页面接入准备，也不会生成旅行攻略。环境配置
+提交时会在保留草稿的前提下调用受认证的 `POST /trips`，随后进入 TripPlan 生成页和只读详情页；
+TripPlan 生成、详情和版本读取复用小程序 Trip/TripPlan Service。环境配置
 集中在 `apps/miniapp/config/environment.ts`，支持 `development`、`test` 和 `production`；
 测试环境使用本地地址，生产环境只保留 `.invalid` 占位地址。发布前应在不提交到仓库的本地
 变更中替换生产 Base URL，并同时在微信公众平台的“开发 → 开发管理 → 开发设置 → 服务器

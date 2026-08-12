@@ -11,7 +11,6 @@ import {
   createDefaultTripFormState,
   isTripBudgetLevel,
   isTripBudgetMode,
-  toCreateTripInput,
   type TripFormErrors,
   type TripFormField,
   type TripFormState,
@@ -22,6 +21,8 @@ import { createTripDraftStorage, type TripDraftStorage } from '../../services/tr
 import { getAuthUserMessage, getRequestUserMessage } from '../../services/request-error';
 import { healthService } from '../../services/health.service';
 import { authService } from '../../services/auth.service';
+import { tripService } from '../../services/trip.service';
+import { createTripSubmitController } from '../../utils/trip-submit';
 
 interface MiniAppGlobalData {
   environment: string;
@@ -68,6 +69,13 @@ interface IndexPageData {
 
 const app = getApp<MiniAppGlobalData>();
 const draftStorage: TripDraftStorage = createTripDraftStorage();
+const tripSubmitController = createTripSubmitController({
+  getAccessToken: () => authService.getAccessToken(),
+  login: () => authService.login(),
+  saveDraft: (state) => draftStorage.save(state),
+  createTrip: (input) => tripService.createTrip(input),
+  navigate: (url) => wx.navigateTo({ url }),
+});
 
 const getSelectablePreferenceOptions = (
   selected: TripFormState['preferences'],
@@ -243,7 +251,7 @@ Page<IndexPageData>({
     updateForm(this, { extraRequirements: event.detail.value }, 'extraRequirements');
   },
 
-  onSubmitTrip(this: PageInstance<IndexPageData>): void {
+  async onSubmitTrip(this: PageInstance<IndexPageData>): Promise<void> {
     if (!canSubmitTripForm(this.data.isSubmitting)) {
       return;
     }
@@ -255,24 +263,49 @@ Page<IndexPageData>({
       fieldErrors: {},
     });
 
+    const authAttempted =
+      authService.getAccessToken() === undefined || authService.getAccessToken()?.trim() === '';
+    if (authAttempted) {
+      this.setData({ isAuthLoading: true, authError: '' });
+    }
+
     try {
-      toCreateTripInput(this.data.form);
-      draftStorage.save(this.data.form);
+      // Keep the local draft even when creation or generation fails so the user can retry.
+      const submission = await tripSubmitController.submit(this.data.form);
+      if (submission.status === 'ignored') {
+        this.setData({ isSubmitting: false, isAuthLoading: false });
+        return;
+      }
       this.setData({
         isSubmitting: false,
-        submitMessage: '旅行需求已保存',
+        isAuthLoading: false,
+        isLoggedIn: submission.authenticated,
+        submitMessage: '',
+        submitError: '',
       });
     } catch (error: unknown) {
       if (error instanceof TripFormValidationError) {
         this.setData({
           isSubmitting: false,
+          isAuthLoading: false,
           fieldErrors: error.errors,
+        });
+        return;
+      }
+
+      if (authAttempted && authService.getAccessToken() === undefined) {
+        this.setData({
+          isSubmitting: false,
+          isAuthLoading: false,
+          authError: getAuthUserMessage(error),
         });
         return;
       }
 
       this.setData({
         isSubmitting: false,
+        isAuthLoading: false,
+        isLoggedIn: authService.getCurrentUser() !== undefined,
         submitError: '暂时无法保存旅行需求，请稍后重试',
       });
     }

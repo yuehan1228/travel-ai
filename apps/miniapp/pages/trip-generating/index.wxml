@@ -1,0 +1,23 @@
+<view class="page">
+  <view class="hero">
+    <text class="title">正在生成你的旅行攻略</text>
+    <text class="subtitle">我们会逐项核对真实天气、地点、路线和预算，请稍候。</text>
+  </view>
+
+  <view wx:if="{{status === 'generating'}}" class="status-card">
+    <view class="spinner" aria-label="生成中"></view>
+    <text class="phase-message">{{phaseMessage}}</text>
+    <text class="hint">攻略生成需要一点时间，页面可以安全等待。</text>
+  </view>
+
+  <view wx:elif="{{status === 'auth-required'}}" class="status-card error-card">
+    <text class="error-message">{{errorMessage}}</text>
+    <button type="primary" bindtap="onAuthAndRetry">重新登录并继续</button>
+  </view>
+
+  <view wx:elif="{{status === 'failed'}}" class="status-card error-card">
+    <text class="error-message">{{errorMessage}}</text>
+    <button type="primary" bindtap="onRetry">重新生成</button>
+  </view>
+</view>
+

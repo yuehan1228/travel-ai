@@ -136,8 +136,11 @@ Schema，缺少 Token 时不访问网络并在 `AUTH_TOKEN_INVALID` 时清理认
 
 ### 当前能力边界
 
-旅行草稿 CRUD、基础天气查询、POI 检索、两点路线估算、路线矩阵和确定性的访问顺序建议是当前服务端旅行业务能力。精确路线
-优化、地图 UI 和公共攻略生成 API 留待后续任务；TASK-016 仅提供服务端内部的 LLM Provider、版本化 Prompt 和 TripPlan 生成编排基础层。共享包提供严格的 TripPlan 结构化契约和 Runtime Schema，Schema 不证明 `providerPlaceId` 等实体真实性，真实性白名单校验由生成编排执行；天气、地点和路线模块不创建 TripPlan 实例、Timeline 或攻略生成逻辑。
+旅行草稿 CRUD、基础天气查询、POI 检索、两点路线估算、路线矩阵、确定性的访问顺序建议、TripPlan 版本化生成 API 和小程序只读
+攻略页面是当前能力。精确路线优化、地图 UI、编辑和公共未认证攻略生成仍留待后续任务；TASK-016 提供服务端内部的 LLM Provider、
+版本化 Prompt 和 TripPlan 生成编排基础层，TASK-017 接入受认证 API，TASK-018 接入小程序生成与展示流程。共享包提供严格的
+TripPlan 结构化契约和 Runtime Schema，Schema 不证明 `providerPlaceId` 等实体真实性，真实性白名单校验由生成编排执行；天气、地点
+和路线模块不创建 TripPlan 实例、Timeline 或攻略生成逻辑。
 
 Migration 不会在应用启动时自动执行，也没有重置或删除生产表脚本。启动本地 PostgreSQL
 后，复制 `.env.example` 为 `.env` 并运行：
@@ -184,6 +187,22 @@ unavailable 路线作为交通耗时都会稳定失败。`climate_reference` 天
 共享 Schema 校验 `tripId`、版本和状态一致性。所有响应使用 Api Envelope，`x-request-id` 和 `requestId` 保持一致。
 
 小程序 `TripPlanService` 仅封装三个只读/生成调用，复用 `HttpClient`、`AuthService` 和共享 Zod Runtime Schema；
-无 Token 不发网络请求，认证失效清除本地 Token。TASK-017 不包含编辑、单日重生成、公开未认证分享、页面、地图 UI、
-实时价格、Redis、队列或精确 TSP。Migration 由 Drizzle Kit 生成并登记在 `apps/server/migrations/meta`，应用启动不自动
+无 Token 不发网络请求，认证失效清除本地 Token。TASK-017 API 本身不包含编辑、单日重生成、公开未认证分享、地图 UI、实时价格、
+Redis、队列或精确 TSP；小程序页面和生成体验属于 TASK-018。Migration 由 Drizzle Kit 生成并登记在 `apps/server/migrations/meta`，应用启动不自动
 执行；部署前必须人工审阅 `0005_trip_plan_versions.sql` 并显式运行 `db:migrate`。
+
+### 小程序 TripPlan 生成流程与只读详情（TASK-018）
+
+首页提交由轻量表单状态转换为严格 `CreateTripInputSchema` 输入，先检查 `AuthService` 登录状态，再保存本地草稿并调用
+`POST /trips`；创建或后续生成失败时草稿保持不变。提交和生成均使用单飞（single-flight）保护，避免重复创建或重复生成。
+生成页按“正在准备旅行需求、正在查询天气、正在筛选景点、正在规划路线、正在生成攻略、正在保存攻略”六段中文阶段文案循环提示，不对应服务端百分比或完成状态；成功、失败、认证失效和页面卸载都会停止并清理阶段
+定时器，失败可重试且不会重置草稿。
+
+`pages/trip-plan/index` 只渲染经过共享 `TripPlanSchema` 和版本结果 Schema 校验的 `ready` 快照。页面包含头部、每日天气和
+时间线、已验证地点、真实路线、日/总费用、提示与 warning，以及住宿、餐饮、交通、通用提示和分类预算。天气的
+`forecast`、`climate_reference`、`unavailable` 语义分别显示预报、历史气候参考通知和“暂无可靠天气数据”；没有路线或路线
+`unavailable` 时只展示缺失/不可用状态，不生成距离、时长或费用。普通文本使用原生 `text/view`，不解析 `rich-text`。
+
+详情页对 URL 的 `tripId` 和可选 `version` 做 UUID/整数范围校验；历史版本最多保留 100 条摘要（包括生成中、失败和可查看状态），只有 `ready` 摘要进入切换选择器，切换请求失败或返回
+非 `ready` 状态时保留旧快照。认证令牌和失效清理继续集中在 `AuthService`，页面与 adapter 不记录令牌、Prompt、Provider 原始
+响应或任何密钥。TASK-018 明确不实现编辑、单日重生成、替换地点、聊天、地图、分享、实时价格、Redis/队列/实时协作功能。

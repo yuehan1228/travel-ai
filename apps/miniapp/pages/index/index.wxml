@@ -2,7 +2,7 @@
   <view class="hero">
     <text class="title">{{projectName}}</text>
     <text class="environment">当前环境：{{environment}}</text>
-    <text class="subtitle">告诉我们你的旅行想法，先保存一份需求草稿。</text>
+    <text class="subtitle">告诉我们你的旅行想法，生成一份有真实数据依据的攻略。</text>
   </view>
 
   <view class="auth-card">
@@ -176,7 +176,7 @@
     </view>
 
     <button class="submit-button" type="primary" loading="{{isSubmitting}}" disabled="{{isSubmitting}}" bindtap="onSubmitTrip">
-      保存旅行需求
+      生成旅行攻略
     </button>
     <button class="clear-button" disabled="{{isSubmitting}}" bindtap="onClearDraft">清除本地草稿</button>
     <view wx:if="{{submitMessage}}" class="form-message success-message">{{submitMessage}}</view>
