@@ -182,6 +182,17 @@ Trip 行级原子 reservation。成功保存递增的新不可变版本，失败
 小程序详情页以普通文本展示候选，选择后进行二次确认并使用单飞 loading；成功切换到新版本，失败保留旧攻略和当前选择，认证失效继续由
 `AuthService` 清理 Token。仍不提供地图、HTML、chat 或实时价格。
 
+### TripPlan 同日 Timeline 顺序调整（TASK-023）
+
+`POST /trips/:id/plan/:version/reorder-items` 受 `AuthGuard` 保护，请求体严格为
+`{ sourceVersion, dayNumber, orderedItemIds }`，且 URL 与 body 版本必须一致。`orderedItemIds` 必须完整、唯一地覆盖目标 ready 日的所有条目；纯函数
+`reorderTripPlanDayItems` 只复制快照并执行集合/顺序校验，无实际变化在 reservation 前返回稳定验证错误。
+
+服务端按新顺序通过现有 `RouteService` 重算所有相邻真实路线，使用原条目游览时长、当天最早开始时间和真实路线耗时确定性重算时间；不直连 Provider、不直线估算，路线不可用、重叠或跨日均拒绝。预算与条目金额保持守恒，完整结果再次通过 `TripPlanSchema`。
+`operation='reorder-items'` 与既有写操作共用 Trip 行级原子 reservation；成功保存递增不可变 ready 版本，失败保留失败元数据并恢复原 ready 状态，不新增 Migration、Redis 或队列。
+
+小程序详情页以原生“上移/下移”按钮只修改按日顺序草稿，并提供“恢复原顺序”；点击“保存为新版本”前进行二次确认，确认后才单飞提交完整条目集合，成功切换新版本，失败保留旧攻略和草稿。缺少令牌不会联网，`AUTH_TOKEN_INVALID` 由 `AuthService` 清理。未引入拖拽库、地图、HTML 或聊天。
+
 访问顺序建议使用需要认证的 `POST /routes/order`，在真实路线矩阵上运行确定性的最近邻（nearest-neighbor）贪心算法。
 请求可指定 `startId` 和 `endId`；未指定起点时按点 ID 字典序选择，候选路线按预计耗时、距离和目标 ID 依次打破平局，
 并将指定终点保留到最后。不可用的两点路线不会参与候选；若无法覆盖全部点则返回 `ROUTE_ORDER_UNAVAILABLE`。结果明确标记

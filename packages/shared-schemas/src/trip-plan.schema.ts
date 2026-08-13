@@ -26,6 +26,8 @@ import {
   type TripPlanItemReplacementCandidateList,
   type ReplaceTripPlanItemInput,
   type ReplaceTripPlanItemResult,
+  type ReorderTripPlanItemsInput,
+  type ReorderTripPlanItemsResult,
   type TripPlanGenerationResult,
   type TripPlanVersionListResult,
   type TripPlanVersionStatus,
@@ -987,6 +989,81 @@ export const ReplaceTripPlanItemResultSchema: z.ZodType<
         code: z.ZodIssueCode.custom,
         path: ['plan', 'generatedAt'],
         message: 'replacement plan generatedAt must match summary.generatedAt',
+      });
+    }
+  });
+
+const reorderItemIdsSchema: z.ZodType<string[], z.ZodTypeDef, unknown> = z
+  .array(z.string().uuid())
+  .min(1, { message: 'orderedItemIds must contain at least one item' })
+  .max(MAX_TRIP_PLAN_ITEMS_PER_DAY)
+  .refine((orderedItemIds) => new Set(orderedItemIds).size === orderedItemIds.length, {
+    message: 'orderedItemIds must not contain duplicates',
+  });
+
+/** Strict request for reordering the complete timeline of one ready day. */
+export const ReorderTripPlanItemsInputSchema: z.ZodType<
+  ReorderTripPlanItemsInput,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    sourceVersion: positiveSafeIntegerSchema,
+    dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
+    orderedItemIds: reorderItemIdsSchema,
+  })
+  .strict();
+
+/** Complete immutable ready result returned by POST .../reorder-items. */
+export const ReorderTripPlanItemsResultSchema: z.ZodType<
+  ReorderTripPlanItemsResult,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    tripId: z.string().uuid(),
+    sourceVersion: positiveSafeIntegerSchema,
+    dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
+    version: positiveSafeIntegerSchema,
+    status: z.literal('ready'),
+    plan: TripPlanSchema,
+    summary: TripPlanVersionSummarySchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.version <= value.sourceVersion) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['version'],
+        message: 'reorder must create a strictly newer version',
+      });
+    }
+    if (value.summary.version !== value.version) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['version'],
+        message: 'version must match summary.version',
+      });
+    }
+    if (
+      value.summary.status !== 'ready' ||
+      value.summary.tripId !== value.tripId ||
+      value.plan.tripId !== value.tripId
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['tripId'],
+        message: 'reorder result trip ids and status must match',
+      });
+    }
+    if (
+      value.summary.generatedAt === undefined ||
+      value.plan.generatedAt !== value.summary.generatedAt
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan', 'generatedAt'],
+        message: 'reordered plan generatedAt must match summary.generatedAt',
       });
     }
   });

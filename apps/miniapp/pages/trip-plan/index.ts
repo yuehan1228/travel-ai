@@ -5,6 +5,7 @@ import type {
   TripPlanVersionDiffResult,
   TripPlanItemReplacementCandidateList,
   ReplaceTripPlanItemInput,
+  ReorderTripPlanItemsInput,
 } from '@travel-guide/shared-types';
 import { EditTripPlanInputSchema } from '@travel-guide/shared-schemas';
 
@@ -13,14 +14,17 @@ import {
   applyLatestTripPlanResult,
   applyTripPlanDayRegenerationResult,
   applyTripPlanItemReplacementResult,
+  applyTripPlanReorderResult,
   applyTripPlanEditResult,
   applyTripPlanDiffResult,
   applyTripPlanVersionRestoreResult,
   applyTripPlanViewError,
+  applyTripPlanItemReorderDraft,
   applyTripPlanVersionResult,
   beginTripPlanLoad,
   beginTripPlanDayRegeneration,
   beginTripPlanItemReplacement,
+  beginTripPlanItemReorder,
   beginTripPlanEdit,
   beginTripPlanDiff,
   beginTripPlanVersionSwitch,
@@ -29,7 +33,11 @@ import {
   createTripPlanViewState,
   createTripPlanViewStateRegistry,
   getTripPlanUserMessage,
+  hasTripPlanReorderDraft,
+  isTripPlanReorderConfirmationAccepted,
+  moveTripPlanItemInOrder,
   parseTripPlanRouteParams,
+  restoreTripPlanItemReorderDraft,
   type TripPlanDisplayModel,
   type TripPlanViewState,
 } from '../../utils/trip-plan-view';
@@ -62,6 +70,7 @@ interface TripPlanPageData {
   selectedVersion?: number;
   regeneratingDay?: number;
   replacingItem?: string;
+  reorderingItem?: string;
   regenerateInstructions: Record<string, string>;
   diff?: TripPlanVersionDiffResult;
   diffFromVersion: number;
@@ -95,6 +104,8 @@ type TripPlanPageDisplayModel = Omit<TripPlanDisplayModel, 'days'> & {
     Omit<TripPlanDisplayModel['days'][number], 'items'> & {
       regenerateInstruction: string;
       isRegenerating: boolean;
+      isReordering: boolean;
+      hasReorderDraft: boolean;
       editSummary: string;
       items: Array<
         TripPlanDisplayModel['days'][number]['items'][number] & {
@@ -105,6 +116,7 @@ type TripPlanPageDisplayModel = Omit<TripPlanDisplayModel, 'days'> & {
           editEstimatedCostCny: string;
           replacementCandidates: ReplacementCandidateView[];
           isReplacing: boolean;
+          isReordering: boolean;
           selectedReplacementPlaceId?: string;
         }
       >;
@@ -156,6 +168,8 @@ const syncPage = (
             ...day,
             regenerateInstruction: page.data.regenerateInstructions[String(day.dayNumber)] ?? '',
             isRegenerating: state.regeneratingDay === day.dayNumber,
+            isReordering: state.reorderingItem === `${day.dayNumber}:save`,
+            hasReorderDraft: hasTripPlanReorderDraft(state, day.dayNumber),
             editSummary: page.data.editDayDrafts[String(day.dayNumber)]?.summary ?? day.summary,
             items: day.items.map((item) => {
               const draft = page.data.editItemDrafts[`${day.dayNumber}:${item.id}`];
@@ -172,6 +186,7 @@ const syncPage = (
                 isReplacing:
                   state.replacingItem === `${day.dayNumber}:${item.id}` ||
                   page.data.replacementLoadingItem === `${day.dayNumber}:${item.id}`,
+                isReordering: state.reorderingItem === `${day.dayNumber}:save`,
                 selectedReplacementPlaceId:
                   page.data.replacementSelection[`${day.dayNumber}:${item.id}`],
               };
@@ -193,6 +208,7 @@ const syncPage = (
     selectedVersion: state.selectedVersion,
     regeneratingDay: state.regeneratingDay,
     replacingItem: state.replacingItem,
+    reorderingItem: state.reorderingItem,
     diff: state.diff,
     diffFromVersion: state.diffFromVersion ?? 0,
     diffToVersion: state.diffToVersion ?? 0,
@@ -212,7 +228,26 @@ const syncPage = (
 };
 
 const displayPlan = (state: TripPlanViewState): TripPlanDisplayModel | undefined =>
-  state.plan === undefined ? undefined : createTripPlanDisplayModel(state.plan);
+  state.plan === undefined
+    ? undefined
+    : (() => {
+        const display = createTripPlanDisplayModel(state.plan);
+        return {
+          ...display,
+          days: display.days.map((day) => {
+            const orderedItemIds = state.reorderDrafts[String(day.dayNumber)];
+            if (orderedItemIds === undefined) return day;
+            const itemsById = new Map(day.items.map((item) => [item.id, item]));
+            const reorderedItems = orderedItemIds.flatMap((itemId) => {
+              const item = itemsById.get(itemId);
+              return item === undefined ? [] : [item];
+            });
+            return reorderedItems.length === day.items.length
+              ? { ...day, items: reorderedItems }
+              : day;
+          }),
+        };
+      })();
 
 const loadLatest = async (page: PageInstance<TripPlanPageData>): Promise<void> => {
   if (page.data.isLoading || page.data.tripId.length === 0) return;
@@ -326,6 +361,105 @@ const regenerateDay = async (
     // A failed replacement keeps the old immutable plan visible for retry.
     syncPage(page, nextState, oldPlan);
   }
+};
+
+const reorderTripPlanItem = (
+  page: PageInstance<TripPlanPageData>,
+  dayNumber: number,
+  itemId: string,
+  direction: 'up' | 'down',
+): void => {
+  const state = getViewState(page);
+  if (
+    page.data.tripId.length === 0 ||
+    state.status !== 'ready' ||
+    state.selectedVersion === undefined ||
+    state.reorderingItem !== undefined ||
+    state.regeneratingDay !== undefined ||
+    state.replacingItem !== undefined ||
+    state.isSwitching
+  ) {
+    return;
+  }
+  const sourcePlan = state.plan;
+  const day = sourcePlan?.days.find((candidate) => candidate.dayNumber === dayNumber);
+  if (day === undefined) return;
+  const currentIds = state.reorderDrafts[String(dayNumber)] ?? day.items.map((item) => item.id);
+  const orderedItemIds = moveTripPlanItemInOrder(currentIds, itemId, direction);
+  if (orderedItemIds === undefined) return;
+  const nextState = applyTripPlanItemReorderDraft(state, dayNumber, orderedItemIds);
+  if (nextState === state) return;
+  setViewState(page, nextState);
+  syncPage(page, nextState, displayPlan(nextState));
+};
+
+const restoreTripPlanReorder = (page: PageInstance<TripPlanPageData>, dayNumber: number): void => {
+  const state = getViewState(page);
+  const nextState = restoreTripPlanItemReorderDraft(state, dayNumber);
+  if (nextState === state) return;
+  setViewState(page, nextState);
+  syncPage(page, nextState, displayPlan(nextState));
+};
+
+const submitTripPlanReorder = async (
+  page: PageInstance<TripPlanPageData>,
+  dayNumber: number,
+): Promise<void> => {
+  const state = getViewState(page);
+  const orderedItemIds = state.reorderDrafts[String(dayNumber)];
+  if (
+    orderedItemIds === undefined ||
+    state.reorderingItem !== undefined ||
+    state.status !== 'ready' ||
+    state.selectedVersion === undefined ||
+    page.data.tripId.length === 0
+  ) {
+    return;
+  }
+  const input: ReorderTripPlanItemsInput = {
+    sourceVersion: state.selectedVersion,
+    dayNumber,
+    orderedItemIds: [...orderedItemIds],
+  };
+  let nextState = beginTripPlanItemReorder(state, `${dayNumber}:save`);
+  setViewState(page, nextState);
+  syncPage(page, nextState, displayPlan(nextState));
+  try {
+    const result = await tripPlanService.reorderTripPlanItems(
+      page.data.tripId,
+      input.sourceVersion,
+      input,
+    );
+    if (!viewStates.has(page)) return;
+    nextState = applyTripPlanReorderResult(getViewState(page), result);
+    setViewState(page, nextState);
+    syncPage(page, nextState, displayPlan(nextState));
+  } catch (error: unknown) {
+    if (!viewStates.has(page)) return;
+    nextState = applyTripPlanViewError(getViewState(page), getTripPlanUserMessage(error));
+    setViewState(page, nextState);
+    // Keep the old immutable plan and the local order draft available for retry.
+    syncPage(page, nextState, displayPlan(nextState));
+  }
+};
+
+const confirmTripPlanReorder = (page: PageInstance<TripPlanPageData>, dayNumber: number): void => {
+  const run = (): void => {
+    void submitTripPlanReorder(page, dayNumber);
+  };
+  if (typeof wx.showModal !== 'function') {
+    run();
+    return;
+  }
+  wx.showModal({
+    title: '确认保存顺序',
+    content: '将当前顺序保存为新的攻略版本？',
+    confirmText: '保存为新版本',
+    cancelText: '继续调整',
+    success: (result) => {
+      if (isTripPlanReorderConfirmationAccepted(result)) run();
+    },
+  });
 };
 
 const replacementItemKey = (dayNumber: number, itemId: string): string => `${dayNumber}:${itemId}`;
@@ -776,6 +910,7 @@ Page<TripPlanPageData>({
     editItemDrafts: {},
     replacementCandidates: {},
     replacementSelection: {},
+    reorderingItem: undefined,
   },
 
   onLoad(this: PageInstance<TripPlanPageData>, options: TripPlanRouteOptions): void {
@@ -837,6 +972,32 @@ Page<TripPlanPageData>({
     const dayNumber = dayNumberFromEvent(event);
     if (dayNumber === undefined) return;
     void regenerateDay(this, dayNumber);
+  },
+
+  onReorderItem(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    const dayNumber = dayNumberFromEvent(event);
+    const itemId = replacementItemIdFromEvent(event);
+    const direction = event.currentTarget?.dataset?.direction;
+    if (
+      dayNumber === undefined ||
+      itemId === undefined ||
+      (direction !== 'up' && direction !== 'down')
+    ) {
+      return;
+    }
+    reorderTripPlanItem(this, dayNumber, itemId, direction);
+  },
+
+  onRestoreReorder(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    const dayNumber = dayNumberFromEvent(event);
+    if (dayNumber === undefined) return;
+    restoreTripPlanReorder(this, dayNumber);
+  },
+
+  onSaveReorder(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    const dayNumber = dayNumberFromEvent(event);
+    if (dayNumber === undefined) return;
+    confirmTripPlanReorder(this, dayNumber);
   },
 
   onLoadReplacementCandidates(

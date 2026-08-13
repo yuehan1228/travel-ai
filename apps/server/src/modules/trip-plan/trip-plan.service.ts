@@ -11,6 +11,8 @@ import {
   TripPlanItemReplacementCandidateListSchema,
   ReplaceTripPlanItemInputSchema,
   ReplaceTripPlanItemResultSchema,
+  ReorderTripPlanItemsInputSchema,
+  ReorderTripPlanItemsResultSchema,
   RegenerateTripPlanDayInputSchema,
   RegenerateTripPlanDayResultSchema,
   RestoreTripPlanVersionInputSchema,
@@ -52,6 +54,8 @@ import type {
   ListTripPlanItemReplacementCandidatesInput,
   ReplaceTripPlanItemInput,
   ReplaceTripPlanItemResult,
+  ReorderTripPlanItemsInput,
+  ReorderTripPlanItemsResult,
   Place,
   TripPlanItem,
 } from '@travel-guide/shared-types';
@@ -69,6 +73,7 @@ import { TripPlanDayRegenerationContextSchema } from './trip-plan-day-regenerati
 import type { TripPlanDayRegenerationContext } from './trip-plan-day-regeneration.types';
 import { TripPlanGenerationService } from './trip-plan-generation.service';
 import { applyTripPlanEdits, TripPlanEditError } from './trip-plan-edit';
+import { reorderTripPlanDayItems, TripPlanReorderError } from './trip-plan-reorder';
 import {
   compareTripPlanVersions,
   TripPlanDiffValidationError,
@@ -157,6 +162,13 @@ const replacementUnavailableError = (): TripPlanException =>
     'A real route for the replacement is unavailable',
   );
 
+const reorderUnavailableError = (): TripPlanException =>
+  new TripPlanException(
+    'TRIP_PLAN_REORDER_UNAVAILABLE',
+    422,
+    'A real route for the reordered timeline is unavailable',
+  );
+
 const MAX_REPLACEMENT_CANDIDATE_PAGES = 50;
 
 const asCode = (error: unknown): string | undefined =>
@@ -168,6 +180,16 @@ const mapEditError = (error: unknown): TripPlanException => {
   if (error instanceof TripPlanException) return error;
   if (error instanceof TripPlanEditError) {
     if (error.code === 'TRIP_PLAN_ENTITY_MISMATCH') return entityMismatchError();
+    return validationError();
+  }
+  return persistenceError();
+};
+
+const mapReorderError = (error: unknown): TripPlanException => {
+  if (error instanceof TripPlanException) return error;
+  if (error instanceof TripPlanReorderError) {
+    if (error.code === 'TRIP_PLAN_ENTITY_MISMATCH') return entityMismatchError();
+    if (error.code === 'TRIP_PLAN_REORDER_UNAVAILABLE') return reorderUnavailableError();
     return validationError();
   }
   return persistenceError();
@@ -308,6 +330,72 @@ const recomputePlanBudget = (plan: TripPlan, generatedAt: string): TripPlan => {
     },
     generatedAt,
   };
+};
+
+const timeToMinutes = (value: string): number => {
+  const [hours, minutes] = value.split(':').map(Number);
+  return hours * 60 + minutes;
+};
+
+const minutesToTime = (value: number): string => {
+  const hours = Math.floor(value / 60);
+  const minutes = value % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+};
+
+const reorderTimelineWithRoutes = (
+  plan: TripPlan,
+  dayNumber: number,
+  routeMap: ReadonlyMap<string, RouteEstimate>,
+  generatedAt: string,
+): TripPlan => {
+  const dayIndex = plan.days.findIndex((day) => day.dayNumber === dayNumber);
+  if (dayIndex < 0) throw entityMismatchError();
+  const sourceDay = plan.days[dayIndex]!;
+  const earliestStart = Math.min(...sourceDay.items.map((item) => timeToMinutes(item.startTime)));
+  let cursor = earliestStart;
+  let previous: TripPlan['days'][number]['items'][number] | undefined;
+  const items = sourceDay.items.map((item) => {
+    const duration = timeToMinutes(item.endTime) - timeToMinutes(item.startTime);
+    if (duration <= 0) {
+      throw validationError();
+    }
+    const routeKey =
+      previous?.place === undefined || item.place === undefined
+        ? undefined
+        : `place:${previous.place.id}->place:${item.place.id}`;
+    const route = routeKey === undefined ? undefined : routeMap.get(routeKey);
+    if (routeKey !== undefined && route === undefined) throw reorderUnavailableError();
+    const travelMinutes =
+      route === undefined || route.dataSource === 'unavailable'
+        ? 0
+        : Math.ceil(route.durationSeconds / 60);
+    const start = cursor + travelMinutes;
+    const end = start + duration;
+    if (start < 0 || end > 24 * 60 || end <= start) throw validationError();
+    cursor = end;
+    previous = item;
+    const dataSources = route
+      ? item.dataSources.includes('route_provider')
+        ? [...item.dataSources]
+        : [...item.dataSources, 'route_provider' as const]
+      : item.dataSources.filter((source) => source !== 'route_provider');
+    return {
+      ...item,
+      startTime: minutesToTime(start),
+      endTime: minutesToTime(end),
+      ...(route === undefined ? { route: undefined } : { route }),
+      dataSources,
+    };
+  });
+  const nextPlan = {
+    ...plan,
+    generatedAt,
+    days: plan.days.map((day, index) => (index === dayIndex ? { ...day, items } : day)),
+  };
+  const validated = TripPlanSchema.safeParse(nextPlan);
+  if (!validated.success) throw validationError();
+  return validated.data;
 };
 
 const mapContextError = (error: unknown): TripPlanException => {
@@ -947,6 +1035,164 @@ export class TripPlanService {
     }
   }
 
+  /** Reorder one day's complete timeline using fresh real-route durations. */
+  public async reorderTripPlanItems(
+    userId: string,
+    tripId: string,
+    version: number,
+    input: ReorderTripPlanItemsInput,
+  ): Promise<ReorderTripPlanItemsResult> {
+    this.assertTripId(tripId);
+    const parsedInput = ReorderTripPlanItemsInputSchema.safeParse(input);
+    if (!parsedInput.success || parsedInput.data.sourceVersion !== version) {
+      throw validationError();
+    }
+    const now = this.clock.now();
+    if (Number.isNaN(now.getTime())) throw validationError();
+
+    const trip = await this.requireTripForVersionOperation(userId, tripId);
+    if (trip.status === 'generating') throw inProgressError();
+
+    let sourceRecord: TripPlanVersionRecord | undefined;
+    try {
+      sourceRecord = await this.repository.findVersionForUser(userId, tripId, version);
+    } catch {
+      throw persistenceError();
+    }
+    if (
+      sourceRecord === undefined ||
+      sourceRecord.status !== 'ready' ||
+      sourceRecord.plan === undefined
+    ) {
+      throw planNotFoundError();
+    }
+    const sourcePlan = TripPlanSchema.safeParse(sourceRecord.plan);
+    if (!sourcePlan.success || sourcePlan.data.tripId !== tripId) throw persistenceError();
+
+    const generatedAt = now.toISOString();
+    let validationPlan: TripPlan;
+    try {
+      // Validate entities and no-op before creating a failed reservation record.
+      validationPlan = reorderTripPlanDayItems(sourcePlan.data, parsedInput.data, generatedAt);
+    } catch (error: unknown) {
+      throw mapReorderError(error);
+    }
+    const targetDay = sourcePlan.data.days.find(
+      (candidate) => candidate.dayNumber === parsedInput.data.dayNumber,
+    );
+    if (targetDay === undefined) throw entityMismatchError();
+    const orderedItems = validationPlan.days.find(
+      (candidate) => candidate.dayNumber === parsedInput.data.dayNumber,
+    )?.items;
+    if (orderedItems === undefined) throw entityMismatchError();
+
+    let reserved: TripPlanEditReservationResult;
+    try {
+      if (this.repository.reserveReorderItems !== undefined) {
+        reserved = await this.repository.reserveReorderItems(
+          userId,
+          tripId,
+          version,
+          parsedInput.data.dayNumber,
+          parsedInput.data.orderedItemIds,
+          now,
+        );
+      } else {
+        const fallback = await this.repository.reserveGeneration(userId, tripId, now);
+        reserved =
+          fallback.status === 'reserved'
+            ? {
+                status: 'reserved',
+                reservation: {
+                  ...fallback.reservation,
+                  operation: 'reorder-items' as const,
+                  sourceVersion: version,
+                  dayNumber: parsedInput.data.dayNumber,
+                  orderedItemIds: [...parsedInput.data.orderedItemIds],
+                  previousTripStatus: fallback.reservation.previousTripStatus ?? trip.status,
+                },
+              }
+            : fallback;
+      }
+    } catch {
+      throw persistenceError();
+    }
+    if (reserved.status === 'not_found') throw tripNotFoundError();
+    if (reserved.status === 'in_progress') throw inProgressError();
+    if (reserved.status === 'source_not_ready') throw planNotFoundError();
+    const reservation = {
+      ...reserved.reservation,
+      operation: 'reorder-items' as const,
+      sourceVersion: version,
+      dayNumber: parsedInput.data.dayNumber,
+      orderedItemIds: [...parsedInput.data.orderedItemIds],
+      previousTripStatus: reserved.reservation.previousTripStatus ?? trip.status,
+    };
+
+    try {
+      const mode = trip.inputSnapshot.transportPreference === 'driving' ? 'driving' : 'walking';
+      const routeMap = new Map<string, RouteEstimate>();
+      for (let index = 1; index < orderedItems.length; index += 1) {
+        const origin = orderedItems[index - 1]?.place;
+        const destination = orderedItems[index]?.place;
+        if (origin === undefined || destination === undefined) continue;
+        try {
+          const estimate = await this.routeService.estimateRoute({
+            origin: { location: origin.location, placeId: origin.id },
+            destination: { location: destination.location, placeId: destination.id },
+            mode,
+          });
+          if (estimate.dataSource === 'unavailable') throw reorderUnavailableError();
+          routeMap.set(`place:${origin.id}->place:${destination.id}`, estimate);
+        } catch (error: unknown) {
+          if (error instanceof TripPlanException) throw error;
+          if (asCode(error) === 'ROUTE_UNAVAILABLE') throw reorderUnavailableError();
+          throw mapContextError(error);
+        }
+      }
+
+      const reorderedOrder = reorderTripPlanDayItems(
+        sourcePlan.data,
+        parsedInput.data,
+        generatedAt,
+      );
+      const reorderedPlan = reorderTimelineWithRoutes(
+        reorderedOrder,
+        parsedInput.data.dayNumber,
+        routeMap,
+        generatedAt,
+      );
+      let saved: TripPlanVersionRecord;
+      try {
+        saved = await this.repository.saveReady(userId, tripId, reservation, reorderedPlan, now);
+      } catch {
+        throw persistenceError();
+      }
+      const result: ReorderTripPlanItemsResult = {
+        tripId,
+        sourceVersion: version,
+        dayNumber: parsedInput.data.dayNumber,
+        version: saved.version,
+        status: 'ready',
+        plan: reorderedPlan,
+        summary: tripPlanVersionSummary(saved),
+      };
+      const validated = ReorderTripPlanItemsResultSchema.safeParse(result);
+      if (!validated.success) throw persistenceError();
+      return validated.data;
+    } catch (error: unknown) {
+      const mapped = mapReorderError(error);
+      try {
+        const failedAt = this.clock.now();
+        if (Number.isNaN(failedAt.getTime())) throw persistenceError();
+        await this.repository.markFailed(userId, tripId, reservation, failedAt);
+      } catch {
+        throw persistenceError();
+      }
+      throw mapped;
+    }
+  }
+
   /** Apply a controlled edit to a ready snapshot without invoking any Provider. */
   public edit(
     userId: string,
@@ -1338,6 +1584,15 @@ export class TripPlanService {
     input: RegenerateTripPlanDayInput,
   ): Promise<RegenerateTripPlanDayResult> {
     return this.regenerateDay(userId, tripId, input);
+  }
+
+  public reorderTripPlanDayItems(
+    userId: string,
+    tripId: string,
+    version: number,
+    input: ReorderTripPlanItemsInput,
+  ): Promise<ReorderTripPlanItemsResult> {
+    return this.reorderTripPlanItems(userId, tripId, version, input);
   }
 
   public editTripPlanVersion(

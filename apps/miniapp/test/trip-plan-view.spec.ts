@@ -9,12 +9,15 @@ import {
   applyTripPlanVersionRestoreResult,
   applyTripPlanDayRegenerationResult,
   applyTripPlanEditResult,
+  applyTripPlanItemReorderDraft,
+  applyTripPlanReorderResult,
   applyTripPlanViewError,
   applyTripPlanVersionResult,
   beginTripPlanDayRegeneration,
   beginTripPlanEdit,
   beginTripPlanDiff,
   beginTripPlanVersionRestore,
+  beginTripPlanItemReorder,
   createTripPlanDisplayModel,
   createTripPlanViewState,
   createTripPlanViewStateRegistry,
@@ -22,6 +25,9 @@ import {
   formatTripPlanWeather,
   getVisibleTripPlanVersions,
   getReadyTripPlanVersions,
+  isTripPlanReorderConfirmationAccepted,
+  moveTripPlanItemInOrder,
+  restoreTripPlanItemReorderDraft,
   parseLatestTripPlanResult,
   parseTripPlanRouteParams,
 } from '../utils/trip-plan-view';
@@ -96,7 +102,71 @@ const threeDayPlan: TripPlan = {
   })),
 };
 
+const draftFirstId = '423e4567-e89b-12d3-a456-426614174000';
+const draftSecondId = '523e4567-e89b-12d3-a456-426614174000';
+const reorderDraftPlan: TripPlan = {
+  ...plan,
+  days: [
+    {
+      ...plan.days[0],
+      items: [
+        {
+          id: draftFirstId,
+          type: 'rest',
+          startTime: '09:00',
+          endTime: '10:00',
+          name: '一',
+          description: '一',
+          recommendationReason: '一',
+          estimatedCostCny: 1,
+          tips: [],
+          dataSources: ['ai_generated'],
+        },
+        {
+          id: draftSecondId,
+          type: 'rest',
+          startTime: '10:30',
+          endTime: '11:30',
+          name: '二',
+          description: '二',
+          recommendationReason: '二',
+          estimatedCostCny: 2,
+          tips: [],
+          dataSources: ['ai_generated'],
+        },
+      ],
+      estimatedCostCny: 3,
+    },
+  ],
+  budget: {
+    ...plan.budget,
+    totalCny: 3,
+    otherCny: 3,
+  },
+};
+
 describe('TripPlan view adapters', () => {
+  it('handles reorder boundaries and keeps cancellation from opening the save gate', () => {
+    const first = '423e4567-e89b-12d3-a456-426614174000';
+    const second = '523e4567-e89b-12d3-a456-426614174000';
+    const third = '623e4567-e89b-12d3-a456-426614174000';
+    expect(moveTripPlanItemInOrder([first, second, third], first, 'up')).toBeUndefined();
+    expect(moveTripPlanItemInOrder([first, second, third], third, 'down')).toBeUndefined();
+    expect(moveTripPlanItemInOrder([first, second, third], second, 'up')).toEqual([
+      second,
+      first,
+      third,
+    ]);
+    expect(moveTripPlanItemInOrder([first, second, third], second, 'down')).toEqual([
+      first,
+      third,
+      second,
+    ]);
+    expect(isTripPlanReorderConfirmationAccepted({ confirm: false })).toBe(false);
+    expect(isTripPlanReorderConfirmationAccepted({ cancel: true })).toBe(false);
+    expect(isTripPlanReorderConfirmationAccepted({ confirm: true })).toBe(true);
+  });
+
   it('validates URL params before network and rejects malformed versions', () => {
     expect(parseTripPlanRouteParams({ tripId, version: '2' })).toEqual({ tripId, version: 2 });
     expect(() => parseTripPlanRouteParams({ tripId: 'not-a-uuid' })).toThrowError(RequestError);
@@ -206,6 +276,54 @@ describe('TripPlan view adapters', () => {
     expect(switched.selectedVersion).toBe(2);
     expect(switched.regeneratingDay).toBeUndefined();
     expect(switched.readyVersions[0]?.version).toBe(2);
+  });
+
+  it('single-flights reorder and switches only after a ready result', () => {
+    const state = applyLatestTripPlanResult(createTripPlanViewState(tripId), {
+      items: [readySummary],
+      latestVersion: 1,
+      plan,
+    });
+    const loading = beginTripPlanItemReorder(state, '1:223e4567-e89b-12d3-a456-426614174000');
+    expect(loading.reorderingItem).toContain('1:');
+    expect(beginTripPlanItemReorder(loading, '1:other')).toBe(loading);
+    const nextSummary = {
+      ...readySummary,
+      id: '323e4567-e89b-12d3-a456-426614174000',
+      version: 2,
+    };
+    const switched = applyTripPlanReorderResult(loading, {
+      tripId,
+      sourceVersion: 1,
+      dayNumber: 1,
+      version: 2,
+      status: 'ready',
+      plan,
+      summary: nextSummary,
+    });
+    expect(switched.selectedVersion).toBe(2);
+    expect(switched.reorderingItem).toBeUndefined();
+    expect(applyTripPlanViewError(loading, '调整失败').plan).toEqual(plan);
+  });
+
+  it('keeps reorder moves local, supports restore, and preserves the draft after save failure', () => {
+    const state = applyLatestTripPlanResult(createTripPlanViewState(tripId), {
+      items: [readySummary],
+      latestVersion: 1,
+      plan: reorderDraftPlan,
+    });
+    const moved = applyTripPlanItemReorderDraft(state, 1, [draftSecondId, draftFirstId]);
+    expect(moved.reorderDrafts['1']).toEqual([draftSecondId, draftFirstId]);
+    expect(moved.plan?.days[0]?.items.map((item) => item.id)).toEqual([
+      draftFirstId,
+      draftSecondId,
+    ]);
+    const saving = beginTripPlanItemReorder(moved, '1:save');
+    const failed = applyTripPlanViewError(saving, '保存失败');
+    expect(failed.reorderingItem).toBeUndefined();
+    expect(failed.reorderDrafts['1']).toEqual([draftSecondId, draftFirstId]);
+    const restored = restoreTripPlanItemReorderDraft(failed, 1);
+    expect(restored.reorderDrafts).toEqual({});
   });
 
   it('single-flights ready-only edits, switches on success, and keeps drafts on failure', () => {

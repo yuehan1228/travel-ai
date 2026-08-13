@@ -32,6 +32,8 @@ import {
   TripPlanItemReplacementCandidateListSchema,
   ReplaceTripPlanItemInputSchema,
   ReplaceTripPlanItemResultSchema,
+  ReorderTripPlanItemsInputSchema,
+  ReorderTripPlanItemsResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
   ApiSuccess,
@@ -48,6 +50,7 @@ import type {
   ListTripPlanItemReplacementCandidatesInput,
   TripPlanItemReplacementCandidateList,
   ReplaceTripPlanItemResult,
+  ReorderTripPlanItemsResult,
 } from '@travel-guide/shared-types';
 
 import { getRequestId } from '../../http/request-context';
@@ -239,6 +242,36 @@ export class TripPlanController {
       parsedBody.data,
     );
     const validated = ReplaceTripPlanItemResultSchema.safeParse(result);
+    if (!validated.success)
+      throw new TripPlanException(
+        'TRIP_PLAN_PERSISTENCE_ERROR',
+        500,
+        'TripPlan data could not be persisted',
+      );
+    return { success: true, data: validated.data, requestId: requestIdFor(request) };
+  }
+
+  @Post(':id/plan/:version/reorder-items')
+  @HttpCode(HttpStatus.OK)
+  public async reorderItems(
+    @Param('id') tripId: string,
+    @Param('version') version: string,
+    @Body() body: unknown,
+    @CurrentUserId() userId: string,
+    @Req() request: FastifyRequest,
+  ): Promise<ApiSuccess<ReorderTripPlanItemsResult>> {
+    const parsedVersion = parseVersion(version);
+    const parsedBody = ReorderTripPlanItemsInputSchema.safeParse(body);
+    if (!parsedBody.success || parsedBody.data.sourceVersion !== parsedVersion) {
+      throw validationError();
+    }
+    const result = await this.service.reorderTripPlanItems(
+      userId,
+      parseTripId(tripId),
+      parsedVersion,
+      parsedBody.data,
+    );
+    const validated = ReorderTripPlanItemsResultSchema.safeParse(result);
     if (!validated.success)
       throw new TripPlanException(
         'TRIP_PLAN_PERSISTENCE_ERROR',

@@ -236,6 +236,25 @@ export interface ReplaceTripPlanItemResult {
   readonly summary: TripPlanVersionSummary;
 }
 
+/** Strict request for reordering every timeline item in one immutable ready day. */
+export interface ReorderTripPlanItemsInput {
+  readonly sourceVersion: number;
+  readonly dayNumber: number;
+  /** Complete item-id permutation for the target day. */
+  readonly orderedItemIds: string[];
+}
+
+/** Complete immutable ready version returned after a same-day reorder. */
+export interface ReorderTripPlanItemsResult {
+  readonly tripId: string;
+  readonly sourceVersion: number;
+  readonly dayNumber: number;
+  readonly version: number;
+  readonly status: 'ready';
+  readonly plan: TripPlan;
+  readonly summary: TripPlanVersionSummary;
+}
+
 /** Public names for the edit whitelist; values are intentionally not user-extensible. */
 export const TRIP_PLAN_EDITABLE_DAY_FIELDS = ['summary', 'warnings'] as const;
 

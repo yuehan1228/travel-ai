@@ -356,6 +356,25 @@
   margin-right: 12rpx;
 }
 
+.reorder-actions {
+  display: flex;
+  margin-top: 12rpx;
+  gap: 12rpx;
+}
+
+.reorder-draft-card {
+  margin: 20rpx 0;
+  padding: 20rpx;
+  border-radius: 12rpx;
+  background: #f6f8fb;
+}
+
+.reorder-draft-actions {
+  display: flex;
+  gap: 16rpx;
+  margin-top: 12rpx;
+}
+
 .item-cost,
 .day-cost {
   display: block;

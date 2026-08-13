@@ -122,6 +122,27 @@
           >重新生成本日</button>
         </view>
 
+        <view wx:if="{{item.hasReorderDraft}}" class="reorder-draft-card">
+          <text class="block-label">顺序草稿</text>
+          <text class="muted">上移/下移只修改本地草稿，保存前不会创建版本。</text>
+          <view class="reorder-draft-actions">
+            <button
+              size="mini"
+              data-day-number="{{item.dayNumber}}"
+              bindtap="onRestoreReorder"
+              disabled="{{reorderingItem !== undefined}}"
+            >恢复原顺序</button>
+            <button
+              size="mini"
+              type="primary"
+              data-day-number="{{item.dayNumber}}"
+              bindtap="onSaveReorder"
+              loading="{{item.isReordering}}"
+              disabled="{{reorderingItem !== undefined}}"
+            >保存为新版本</button>
+          </view>
+        </view>
+
         <view class="weather-card">
           <view class="weather-heading">
             <text class="subsection-title">天气</text>
@@ -138,6 +159,25 @@
             <view class="timeline-time"><text>{{item.startTime}}</text><text>{{item.endTime}}</text></view>
             <view class="timeline-content">
               <view class="item-heading"><text class="item-type">{{item.typeLabel}}</text><text class="item-name">{{item.name}}</text></view>
+              <view class="reorder-actions">
+                <button
+                  size="mini"
+                  data-day-number="{{item.dayNumber}}"
+                  data-item-id="{{item.id}}"
+                  data-direction="up"
+                  bindtap="onReorderItem"
+                  loading="{{item.isReordering}}"
+                  disabled="{{reorderingItem !== undefined}}"
+                >上移</button>
+                <button
+                  size="mini"
+                  data-day-number="{{item.dayNumber}}"
+                  data-item-id="{{item.id}}"
+                  data-direction="down"
+                  bindtap="onReorderItem"
+                  disabled="{{reorderingItem !== undefined}}"
+                >下移</button>
+              </view>
               <text class="item-description">{{item.description}}</text>
               <text class="item-reason">推荐理由：{{item.recommendationReason}}</text>
               <text class="item-cost">预计 {{item.estimatedCostText}}</text>

@@ -11,6 +11,7 @@ import type {
   TripPlanVersionSummary,
   TripPlanItemReplacementCandidateList,
   ReplaceTripPlanItemResult,
+  ReorderTripPlanItemsResult,
 } from '@travel-guide/shared-types';
 
 import { createHttpClient, type RequestAdapter } from '../services/http-client';
@@ -135,6 +136,15 @@ const itemReplacementResult: ReplaceTripPlanItemResult = {
   plan,
   summary: { ...summary, id: '523e4567-e89b-12d3-a456-426614174000', version: 2 },
 };
+const reorderResult: ReorderTripPlanItemsResult = {
+  tripId,
+  sourceVersion: 1,
+  dayNumber: 1,
+  version: 2,
+  status: 'ready',
+  plan,
+  summary: { ...summary, id: '623e4567-e89b-12d3-a456-426614174000', version: 2 },
+};
 
 const createAuth = (token: string | undefined): TripPlanAuthService & { loggedOut: boolean } => {
   const auth = {
@@ -214,6 +224,45 @@ describe('miniapp TripPlanService', () => {
     await expect(
       service.editTripPlanVersion(tripId, 2, { sourceVersion: 1, summary: '不匹配' }),
     ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
+  it('reorders items through the authenticated versioned endpoint', async () => {
+    const requests: Array<{ method: string; path: string; data: unknown }> = [];
+    const service = new TripPlanService(
+      createClient(async (options) => {
+        requests.push({ method: options.method, path: options.url, data: options.data });
+        return {
+          statusCode: 200,
+          data: { success: true, data: reorderResult, requestId: 'reorder-1' },
+        };
+      }),
+      createAuth('plan-token'),
+    );
+    await expect(
+      service.reorderTripPlanItems(tripId, 1, {
+        sourceVersion: 1,
+        dayNumber: 1,
+        orderedItemIds: [],
+      }),
+    ).rejects.toThrow();
+    await expect(
+      service.reorderTripPlanItems(tripId, 1, {
+        sourceVersion: 1,
+        dayNumber: 1,
+        orderedItemIds: ['223e4567-e89b-12d3-a456-426614174000'],
+      }),
+    ).resolves.toEqual(reorderResult);
+    expect(requests).toEqual([
+      {
+        method: 'POST',
+        path: `https://api.example.invalid/trips/${tripId}/plan/1/reorder-items`,
+        data: {
+          sourceVersion: 1,
+          dayNumber: 1,
+          orderedItemIds: ['223e4567-e89b-12d3-a456-426614174000'],
+        },
+      },
+    ]);
   });
 
   it('uses strict shared schemas, Bearer auth and the three plan endpoints', async () => {

@@ -13,6 +13,7 @@ import {
   TripPlanVersionDiffResultSchema,
   TripPlanSchema,
   TripPlanVersionListResultSchema,
+  ReorderTripPlanItemsResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
   CreateTripInput,
@@ -76,6 +77,8 @@ const tripInput: CreateTripInput = {
 };
 
 const generatedAt = '2026-08-11T00:00:00.000Z';
+const reorderFirstItemId = '423e4567-e89b-12d3-a456-426614174000';
+const reorderSecondItemId = '523e4567-e89b-12d3-a456-426614174000';
 
 const weatherFor = (date: string): DailyWeather => ({
   date,
@@ -115,20 +118,48 @@ const validPlan = (): TripPlan =>
       date,
       summary: `第${index + 1}天`,
       weather: weatherFor(date),
-      items: [],
-      estimatedCostCny: 0,
+      items:
+        index === 0
+          ? [
+              {
+                id: reorderFirstItemId,
+                type: 'rest',
+                startTime: '09:00',
+                endTime: '10:00',
+                name: '休息一',
+                description: '第一段休息',
+                recommendationReason: '节奏舒缓',
+                estimatedCostCny: 1,
+                tips: [],
+                dataSources: ['ai_generated'],
+              },
+              {
+                id: reorderSecondItemId,
+                type: 'rest',
+                startTime: '10:30',
+                endTime: '11:30',
+                name: '休息二',
+                description: '第二段休息',
+                recommendationReason: '节奏舒缓',
+                estimatedCostCny: 2,
+                tips: [],
+                dataSources: ['ai_generated'],
+              },
+            ]
+          : [],
+      estimatedCostCny: index === 0 ? 3 : 0,
       warnings: [],
     })),
     hotelRecommendations: [],
     foodRecommendations: [],
     budget: {
       currency: 'CNY',
-      totalCny: 0,
+      totalCny: 3,
       accommodationCny: 0,
       transportationCny: 0,
       foodCny: 0,
       attractionsCny: 0,
-      otherCny: 0,
+      otherCny: 3,
     },
     transportationTips: [],
     generalTips: [],
@@ -641,5 +672,96 @@ describe('TripPlan API boundary', () => {
     expect(weatherProvider.calls).toBe(beforeWeather);
     expect(placeProvider.calls).toBe(beforePlaces);
     expect(routeProvider.calls).toBe(beforeRoutes);
+  });
+
+  it('protects reorder-items with AuthGuard, strict URL/body versions, and request-id envelope parity', async () => {
+    const unauthenticated = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: `/trips/${validTripId}/plan/3/reorder-items`,
+        headers: { 'x-request-id': 'trip-plan-reorder-auth-1' },
+        payload: {
+          sourceVersion: 3,
+          dayNumber: 1,
+          orderedItemIds: [reorderSecondItemId, reorderFirstItemId],
+        },
+      });
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(unauthenticated.headers['x-request-id']).toBe('trip-plan-reorder-auth-1');
+    expect(ApiFailureSchema.parse(JSON.parse(unauthenticated.payload)).error.code).toBe(
+      'AUTH_TOKEN_INVALID',
+    );
+
+    const token = await login();
+    const mismatch = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: `/trips/${validTripId}/plan/3/reorder-items`,
+        headers: { authorization: `Bearer ${token}`, 'x-request-id': 'trip-plan-reorder-400-1' },
+        payload: {
+          sourceVersion: 2,
+          dayNumber: 1,
+          orderedItemIds: [reorderSecondItemId, reorderFirstItemId],
+        },
+      });
+    expect(mismatch.statusCode).toBe(400);
+    expect(mismatch.headers['x-request-id']).toBe('trip-plan-reorder-400-1');
+    expect(ApiFailureSchema.parse(JSON.parse(mismatch.payload)).error.code).toBe(
+      'TRIP_PLAN_VALIDATION_ERROR',
+    );
+
+    const invalidUrl = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: `/trips/${validTripId}/plan/not-a-version/reorder-items`,
+        headers: { authorization: `Bearer ${token}` },
+        payload: {
+          sourceVersion: 3,
+          dayNumber: 1,
+          orderedItemIds: [reorderSecondItemId, reorderFirstItemId],
+        },
+      });
+    expect(invalidUrl.statusCode).toBe(400);
+    expect(ApiFailureSchema.parse(JSON.parse(invalidUrl.payload)).error.code).toBe(
+      'TRIP_PLAN_VALIDATION_ERROR',
+    );
+
+    const requestId = 'trip-plan-reorder-success-1';
+    const success = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: `/trips/${validTripId}/plan/3/reorder-items`,
+        headers: { authorization: `Bearer ${token}`, 'x-request-id': requestId },
+        payload: {
+          sourceVersion: 3,
+          dayNumber: 1,
+          orderedItemIds: [reorderSecondItemId, reorderFirstItemId],
+        },
+      });
+    expect(success.statusCode).toBe(200);
+    expect(success.headers['x-request-id']).toBe(requestId);
+    const envelope = createApiSuccessSchema(ReorderTripPlanItemsResultSchema).parse(
+      JSON.parse(success.payload),
+    );
+    expect(envelope.requestId).toBe(requestId);
+    expect(envelope.data).toMatchObject({
+      tripId: validTripId,
+      sourceVersion: 3,
+      dayNumber: 1,
+      version: 4,
+      status: 'ready',
+    });
+    expect(envelope.data.plan.days[0]?.items.map((item) => item.id)).toEqual([
+      reorderSecondItemId,
+      reorderFirstItemId,
+    ]);
   });
 });

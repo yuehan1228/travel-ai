@@ -4,6 +4,7 @@ import {
   GenerateTripPlanInputSchema,
   EditTripPlanInputSchema,
   EditTripPlanResultSchema,
+  ReorderTripPlanItemsInputSchema,
   RegenerateTripPlanDayInputSchema,
   RegenerateTripPlanDayResultSchema,
   TripPlanGenerationResultSchema,
@@ -26,6 +27,30 @@ const summary = {
 };
 
 describe('TripPlan version contracts', () => {
+  it('requires the complete orderedItemIds permutation and rejects the legacy field', () => {
+    const orderedItemIds = [
+      '323e4567-e89b-12d3-a456-426614174000',
+      '423e4567-e89b-12d3-a456-426614174000',
+    ];
+    expect(
+      ReorderTripPlanItemsInputSchema.parse({ sourceVersion: 1, dayNumber: 1, orderedItemIds }),
+    ).toEqual({ sourceVersion: 1, dayNumber: 1, orderedItemIds });
+    expect(
+      ReorderTripPlanItemsInputSchema.safeParse({
+        sourceVersion: 1,
+        dayNumber: 1,
+        itemIds: orderedItemIds,
+      }).success,
+    ).toBe(false);
+    expect(
+      ReorderTripPlanItemsInputSchema.safeParse({
+        sourceVersion: 1,
+        dayNumber: 1,
+        orderedItemIds: [orderedItemIds[0], orderedItemIds[0]],
+      }).success,
+    ).toBe(false);
+  });
+
   it('accepts only the controlled edit whitelist and rejects duplicates/unknown fields', () => {
     const itemId = '323e4567-e89b-12d3-a456-426614174000';
     const valid = {

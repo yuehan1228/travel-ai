@@ -7,6 +7,7 @@ import {
   RestoreTripPlanVersionResultSchema,
   TripPlanSchema,
   TripPlanVersionDiffResultSchema,
+  ReorderTripPlanItemsResultSchema,
   TripPlanVersionListResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
@@ -27,6 +28,7 @@ import type {
   TripPlanVersionListResult,
   TripPlanVersionSummary,
   TripPlanVersionDiffResult,
+  ReorderTripPlanItemsResult,
 } from '@travel-guide/shared-types';
 import { z } from 'zod';
 
@@ -113,6 +115,9 @@ export interface TripPlanViewState {
   readonly isSwitching: boolean;
   readonly regeneratingDay?: number;
   readonly replacingItem?: string;
+  readonly reorderingItem?: string;
+  /** Local item-id permutations awaiting an explicit save. */
+  readonly reorderDrafts: Readonly<Record<string, string[]>>;
   readonly errorMessage: string;
   readonly diff?: TripPlanVersionDiffResult;
   readonly diffFromVersion?: number;
@@ -152,6 +157,8 @@ export const createTripPlanViewState = (tripId: string): TripPlanViewState => ({
   isSwitching: false,
   regeneratingDay: undefined,
   replacingItem: undefined,
+  reorderingItem: undefined,
+  reorderDrafts: {},
   errorMessage: '',
   isDiffLoading: false,
   restoringVersion: undefined,
@@ -226,25 +233,153 @@ export const parseTripPlanEditResult = (value: unknown): EditTripPlanResult => {
   return parsed.data;
 };
 
+export const parseTripPlanReorderResult = (value: unknown): ReorderTripPlanItemsResult => {
+  const parsed = ReorderTripPlanItemsResultSchema.safeParse(value);
+  if (!parsed.success || parsed.data.status !== 'ready') throw invalidTripPlanResponse();
+  return parsed.data;
+};
+
+export const beginTripPlanItemReorder = (
+  state: TripPlanViewState,
+  itemKey: string,
+): TripPlanViewState =>
+  state.reorderingItem === undefined &&
+  state.regeneratingDay === undefined &&
+  state.replacingItem === undefined &&
+  !state.isEditing &&
+  !state.isSwitching &&
+  state.status === 'ready' &&
+  itemKey.length > 0
+    ? { ...state, reorderingItem: itemKey, errorMessage: '' }
+    : state;
+
+const reorderDraftKey = (dayNumber: number): string => String(dayNumber);
+
+/** Apply only a local permutation; the immutable ready plan remains untouched. */
+export const applyTripPlanItemReorderDraft = (
+  state: TripPlanViewState,
+  dayNumber: number,
+  orderedItemIds: readonly string[],
+): TripPlanViewState => {
+  if (state.status !== 'ready' || state.plan === undefined || state.reorderingItem !== undefined) {
+    return state;
+  }
+  const day = state.plan.days.find((candidate) => candidate.dayNumber === dayNumber);
+  if (day === undefined) return state;
+  const sourceIds = day.items.map((item) => item.id);
+  if (
+    sourceIds.length !== orderedItemIds.length ||
+    new Set(orderedItemIds).size !== orderedItemIds.length ||
+    sourceIds.some((itemId) => !orderedItemIds.includes(itemId))
+  ) {
+    return state;
+  }
+  if (sourceIds.every((itemId, index) => itemId === orderedItemIds[index])) {
+    const rest = { ...state.reorderDrafts };
+    delete rest[reorderDraftKey(dayNumber)];
+    return { ...state, reorderDrafts: rest };
+  }
+  return {
+    ...state,
+    reorderDrafts: {
+      ...state.reorderDrafts,
+      [reorderDraftKey(dayNumber)]: [...orderedItemIds],
+    },
+    errorMessage: '',
+  };
+};
+
+/** Restore one day's local order to the immutable ready snapshot. */
+export const restoreTripPlanItemReorderDraft = (
+  state: TripPlanViewState,
+  dayNumber: number,
+): TripPlanViewState => {
+  const key = reorderDraftKey(dayNumber);
+  if (!(key in state.reorderDrafts) || state.reorderingItem !== undefined) return state;
+  const rest = { ...state.reorderDrafts };
+  delete rest[key];
+  return { ...state, reorderDrafts: rest, errorMessage: '' };
+};
+
+export const hasTripPlanReorderDraft = (state: TripPlanViewState, dayNumber?: number): boolean =>
+  dayNumber === undefined
+    ? Object.keys(state.reorderDrafts).length > 0
+    : Object.prototype.hasOwnProperty.call(state.reorderDrafts, reorderDraftKey(dayNumber));
+
+/** Swap one item in a local order draft; boundary moves are deterministic no-ops. */
+export const moveTripPlanItemInOrder = (
+  orderedItemIds: readonly string[],
+  itemId: string,
+  direction: 'up' | 'down',
+): string[] | undefined => {
+  const index = orderedItemIds.indexOf(itemId);
+  const targetIndex = direction === 'up' ? index - 1 : index + 1;
+  if (index < 0 || targetIndex < 0 || targetIndex >= orderedItemIds.length) return undefined;
+  const next = [...orderedItemIds];
+  next[index] = next[targetIndex]!;
+  next[targetIndex] = itemId;
+  return next;
+};
+
+/** Pure confirmation gate used before a reorder request is allowed to start. */
+export const isTripPlanReorderConfirmationAccepted = (value: unknown): boolean =>
+  typeof value === 'object' && value !== null && 'confirm' in value && value.confirm === true;
+
+export const applyTripPlanReorderResult = (
+  state: TripPlanViewState,
+  result: ReorderTripPlanItemsResult,
+): TripPlanViewState => {
+  const parsed = parseTripPlanReorderResult(result);
+  if (parsed.tripId !== state.tripId) throw invalidTripPlanResponse();
+  const allVersions = getVisibleTripPlanVersions([
+    parsed.summary,
+    ...state.allVersions.filter((item) => item.version !== parsed.version),
+  ]);
+  return {
+    ...state,
+    status: 'ready',
+    plan: parsed.plan,
+    allVersions,
+    readyVersions: getReadyTripPlanVersions(allVersions),
+    latestVersion: parsed.version,
+    selectedVersion: parsed.version,
+    isSwitching: false,
+    regeneratingDay: undefined,
+    replacingItem: undefined,
+    reorderingItem: undefined,
+    reorderDrafts: {},
+    diff: undefined,
+    diffFromVersion: undefined,
+    diffToVersion: undefined,
+    isDiffLoading: false,
+    restoringVersion: undefined,
+    errorMessage: '',
+  };
+};
+
 export const beginTripPlanLoad = (state: TripPlanViewState): TripPlanViewState => ({
   ...state,
   status: 'loading',
   isSwitching: false,
   regeneratingDay: undefined,
   replacingItem: undefined,
+  reorderingItem: undefined,
+  reorderDrafts: {},
   errorMessage: '',
   isDiffLoading: false,
   restoringVersion: undefined,
 });
 
 export const beginTripPlanVersionSwitch = (state: TripPlanViewState): TripPlanViewState =>
-  state.isEditing
+  state.isEditing || hasTripPlanReorderDraft(state)
     ? state
     : {
         ...state,
         isSwitching: true,
         regeneratingDay: undefined,
         replacingItem: undefined,
+        reorderingItem: undefined,
+        reorderDrafts: {},
         errorMessage: '',
       };
 
@@ -258,6 +393,7 @@ export const beginTripPlanDiff = (
     state.isEditing ||
     state.isSwitching ||
     state.restoringVersion !== undefined ||
+    hasTripPlanReorderDraft(state) ||
     !Number.isSafeInteger(fromVersion) ||
     !Number.isSafeInteger(toVersion) ||
     fromVersion < 1 ||
@@ -298,6 +434,7 @@ export const beginTripPlanVersionRestore = (
   if (
     state.restoringVersion !== undefined ||
     state.isEditing ||
+    hasTripPlanReorderDraft(state) ||
     !Number.isSafeInteger(version) ||
     version < 1 ||
     version === state.selectedVersion
@@ -332,6 +469,8 @@ export const applyTripPlanVersionRestoreResult = (
     isDiffLoading: false,
     restoringVersion: undefined,
     replacingItem: undefined,
+    reorderingItem: undefined,
+    reorderDrafts: {},
     errorMessage: '',
   };
 };
@@ -345,6 +484,7 @@ export const beginTripPlanEdit = (
     state.isSwitching ||
     state.restoringVersion !== undefined ||
     state.regeneratingDay !== undefined ||
+    hasTripPlanReorderDraft(state) ||
     state.status !== 'ready' ||
     state.selectedVersion !== input.sourceVersion
   ) {
@@ -381,6 +521,7 @@ export const applyTripPlanEditResult = (
     diffToVersion: undefined,
     isDiffLoading: false,
     restoringVersion: undefined,
+    reorderDrafts: {},
     errorMessage: '',
   };
 };
@@ -391,6 +532,7 @@ export const beginTripPlanDayRegeneration = (
 ): TripPlanViewState =>
   state.regeneratingDay === undefined &&
   !state.isEditing &&
+  !hasTripPlanReorderDraft(state) &&
   Number.isSafeInteger(dayNumber) &&
   dayNumber >= 1 &&
   dayNumber <= 14
@@ -398,6 +540,8 @@ export const beginTripPlanDayRegeneration = (
         ...state,
         regeneratingDay: dayNumber,
         replacingItem: undefined,
+        reorderingItem: undefined,
+        reorderDrafts: {},
         errorMessage: '',
       }
     : state;
@@ -421,12 +565,14 @@ export const applyLatestTripPlanResult = (
     isSwitching: false,
     regeneratingDay: undefined,
     replacingItem: undefined,
+    reorderingItem: undefined,
     diff: undefined,
     diffFromVersion: undefined,
     diffToVersion: undefined,
     errorMessage: hasPlan ? '' : '暂时没有可用攻略。',
     isDiffLoading: false,
     restoringVersion: undefined,
+    reorderDrafts: {},
   };
 };
 
@@ -436,6 +582,8 @@ export const beginTripPlanItemReplacement = (
 ): TripPlanViewState =>
   state.regeneratingDay === undefined &&
   state.replacingItem === undefined &&
+  state.reorderingItem === undefined &&
+  !hasTripPlanReorderDraft(state) &&
   !state.isEditing &&
   !state.isSwitching &&
   state.status === 'ready' &&
@@ -464,6 +612,8 @@ export const applyTripPlanItemReplacementResult = (
     isSwitching: false,
     regeneratingDay: undefined,
     replacingItem: undefined,
+    reorderingItem: undefined,
+    reorderDrafts: {},
     diff: undefined,
     diffFromVersion: undefined,
     diffToVersion: undefined,
@@ -495,6 +645,8 @@ export const applyTripPlanVersionResult = (
     isSwitching: false,
     regeneratingDay: undefined,
     replacingItem: undefined,
+    reorderingItem: undefined,
+    reorderDrafts: {},
     diff: undefined,
     diffFromVersion: undefined,
     diffToVersion: undefined,
@@ -531,6 +683,8 @@ export const applyTripPlanDayRegenerationResult = (
     isSwitching: false,
     regeneratingDay: undefined,
     replacingItem: undefined,
+    reorderingItem: undefined,
+    reorderDrafts: {},
     diff: undefined,
     diffFromVersion: undefined,
     diffToVersion: undefined,
@@ -549,6 +703,7 @@ export const applyTripPlanViewError = (
   isSwitching: false,
   regeneratingDay: undefined,
   replacingItem: undefined,
+  reorderingItem: undefined,
   isDiffLoading: false,
   restoringVersion: undefined,
   errorMessage,
@@ -584,6 +739,8 @@ export const getTripPlanUserMessage = (error: unknown): string => {
     case 'TRIP_PLAN_REPLACEMENT_UNAVAILABLE':
     case 'ROUTE_UNAVAILABLE':
       return '替换地点的真实路线暂时不可用，请稍后重试。';
+    case 'TRIP_PLAN_REORDER_UNAVAILABLE':
+      return '调整顺序所需的真实路线暂时不可用，请稍后重试。';
     case 'TRIP_PLAN_PROVIDER_ERROR':
     case 'TRIP_PLAN_OUTPUT_INVALID':
     case 'TRIP_PLAN_ENTITY_MISMATCH':

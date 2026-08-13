@@ -250,6 +250,17 @@ Schema 校验，仅允许 `attraction`、`food`、`hotel` 条目，排除原地�
 `generating` reservation；成功事务写入完整版本快照，失败仅保留 `failed` 元数据并恢复原 `ready` 状态，无 Redis、队列或 Migration。
 小程序详情页只用原生文本列出候选、二次确认并单飞提交，成功切换版本，失败保留旧快照和选择，认证失效由 `AuthService` 处理；不引入地图、HTML、chat 或实时价格。
 
+### TripPlan 同日 Timeline 顺序调整（TASK-023）
+
+新增受认证的 `POST /trips/:id/plan/:version/reorder-items`。严格 `ReorderTripPlanItemsInput` 要求
+`sourceVersion` 与 URL 版本一致，`dayNumber` 指向 ready 源快照中的目标日，`orderedItemIds` 必须完整且唯一覆盖该日条目；纯函数
+`reorderTripPlanDayItems` 不修改源快照，并在 reservation 前拒绝实体集合不完整、重复或顺序无变化。
+
+服务端按新顺序复用 `RouteService` 估算所有相邻地点的真实路线，按源条目的游览时长保持当天最早开始时间并确定性加入真实路线分钟数，拒绝不可用路线、重叠和跨日；不直连 Provider 或直线估算。费用/预算不变，完整新快照再次通过 `TripPlanSchema`。
+`operation='reorder-items'` 与生成、单日重生成、恢复、编辑和地点替换共享 Trip 行级原子 reservation；成功事务保存递增不可变 ready 版本，失败仅保存失败元数据并恢复操作前 ready，历史版本和子表行不可变，无 Redis、队列或 Migration。
+
+小程序详情页仅提供原生上移/下移按钮形成按日顺序草稿，并可恢复原顺序；保存为新版本前二次确认，确认后才单飞提交，成功切换版本，失败保留当前攻略和顺序草稿，认证失效继续由 `AuthService` 处理，不引入拖拽库、地图、HTML 或聊天。
+
 ### 小程序 TripPlan 生成流程与只读详情（TASK-018）
 
 首页提交由轻量表单状态转换为严格 `CreateTripInputSchema` 输入，先检查 `AuthService` 登录状态，再保存本地草稿并调用
