@@ -21,7 +21,10 @@ import {
   beginTripPlanItemReorder,
   beginTripPlanOptimization,
   applyTripPlanOptimizationResult,
+  applyTripPlanOptimizationAuditResult,
+  beginTripPlanOptimizationAudit,
   createTripPlanDisplayModel,
+  createTripPlanOptimizationAuditDisplayModel,
   createTripPlanViewState,
   createTripPlanViewStateRegistry,
   formatTripPlanRoute,
@@ -510,6 +513,76 @@ describe('TripPlan view adapters', () => {
     expect(optimized.selectedVersion).toBe(2);
     expect(optimized.optimizingDay).toBeUndefined();
     expect(applyTripPlanViewError(loading, '优化失败').plan).toEqual(plan);
+  });
+
+  it('single-flights audit loading and keeps the current plan on failure', () => {
+    const state = applyLatestTripPlanResult(createTripPlanViewState(tripId), {
+      items: [readySummary],
+      latestVersion: 1,
+      plan,
+    });
+    const loading = beginTripPlanOptimizationAudit(state, 1);
+    expect(loading.isAuditLoading).toBe(true);
+    expect(beginTripPlanOptimizationAudit(loading, 1)).toBe(loading);
+    const audit = applyTripPlanOptimizationAuditResult(loading, {
+      tripId,
+      version: 1,
+      sourceVersion: 2,
+      dayNumber: 1,
+      mode: 'walking',
+      algorithm: 'nearest_neighbor',
+      isOptimal: false,
+      orderedItemIds: [draftFirstId],
+      decisions: [],
+      timelineChanges: [
+        {
+          itemId: draftFirstId,
+          previousStartTime: '09:00',
+          previousEndTime: '10:00',
+          nextStartTime: '09:00',
+          nextEndTime: '10:00',
+          routeStatus: 'not_applicable',
+        },
+      ],
+      warnings: ['Nearest-neighbor is deterministic but not globally optimal.'],
+      generatedAt,
+    });
+    expect(audit.audit?.algorithm).toBe('nearest_neighbor');
+    expect(audit.isAuditLoading).toBe(false);
+    expect(applyTripPlanViewError(loading, '依据不可用').plan).toEqual(plan);
+  });
+
+  it('projects audit UUIDs to stable item labels for the read-only page', () => {
+    const projected = createTripPlanOptimizationAuditDisplayModel(
+      {
+        tripId,
+        version: 2,
+        sourceVersion: 1,
+        dayNumber: 1,
+        mode: 'walking',
+        algorithm: 'nearest_neighbor',
+        isOptimal: false,
+        fixedStartItemId: draftFirstId,
+        orderedItemIds: [draftFirstId],
+        decisions: [],
+        timelineChanges: [
+          {
+            itemId: draftFirstId,
+            previousStartTime: '09:00',
+            previousEndTime: '10:00',
+            nextStartTime: '09:00',
+            nextEndTime: '10:00',
+            routeStatus: 'not_applicable',
+          },
+        ],
+        warnings: ['Nearest-neighbor is deterministic but not globally optimal.'],
+        generatedAt,
+      },
+      plan,
+    );
+    expect(projected.timelineChanges[0]?.itemLabel).toBe('未知条目');
+    expect(projected.fixedStartLabel).toBe('未知条目');
+    expect(JSON.stringify(projected)).not.toContain(draftFirstId);
   });
 
   it('isolates state for two detail page instances', () => {

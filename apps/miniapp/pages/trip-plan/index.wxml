@@ -155,6 +155,14 @@
             loading="{{item.isOptimizing}}"
             disabled="{{isEditing || isSwitching || optimizingDay !== undefined || regeneratingDay !== undefined || replacingItem !== undefined || reorderingItem !== undefined}}"
           >自动优化顺序</button>
+          <button
+            class="audit-button"
+            size="mini"
+            data-day-number="{{item.dayNumber}}"
+            bindtap="onViewOptimizationAudit"
+            loading="{{isAuditLoading && auditDayNumber == item.dayNumber}}"
+            disabled="{{isAuditLoading || isEditing || isSwitching || optimizingDay !== undefined || regeneratingDay !== undefined}}"
+          >查看优化依据</button>
         </view>
 
         <view wx:if="{{item.hasReorderDraft}}" class="reorder-draft-card">
@@ -261,6 +269,28 @@
         </view>
         <text class="day-cost">当日预计 {{item.estimatedCostText}}</text>
       </view>
+    </view>
+
+    <view wx:if="{{audit}}" class="audit-card">
+      <text class="section-title">第 {{audit.dayNumber}} 天优化依据</text>
+      <text class="muted">算法：nearest-neighbor（最近邻启发式），不保证全局最优。模式：{{audit.mode}}</text>
+      <text wx:if="{{audit.fixedStartLabel}}" class="muted">固定起点：{{audit.fixedStartLabel}}</text>
+      <text wx:if="{{audit.fixedEndLabel}}" class="muted">固定终点：{{audit.fixedEndLabel}}</text>
+      <view wx:for="{{audit.decisions}}" wx:key="step" class="audit-decision">
+        <text class="block-label">第 {{item.step}} 步：{{item.originLabel}} → {{item.selectedDestinationLabel}}</text>
+        <text class="muted">选择依据：{{item.reason}}</text>
+        <view wx:for="{{item.candidates}}" wx:for-item="candidate" wx:key="destinationLabel" class="audit-candidate">
+          <text>{{candidate.destinationLabel}} · {{candidate.status === 'available' ? '可用' : '不可用'}}</text>
+          <text wx:if="{{candidate.status === 'available'}}" class="muted">真实耗时 {{candidate.durationSeconds}} 秒，距离 {{candidate.distanceMeters}} 米</text>
+          <text wx:if="{{candidate.status === 'unavailable' && candidate.rejectionReason}}" class="muted">{{candidate.rejectionReason}}</text>
+        </view>
+      </view>
+      <view wx:for="{{audit.timelineChanges}}" wx:key="itemLabel" class="audit-timeline">
+        <text class="block-label">{{item.itemLabel}}</text>
+        <text class="muted">时间：{{item.previousStartTime}}–{{item.previousEndTime}} → {{item.nextStartTime}}–{{item.nextEndTime}}</text>
+        <text class="muted">路线：{{item.routeStatus}}<text wx:if="{{item.routeStatus === 'available'}}">，真实耗时 {{item.routeDurationSeconds}} 秒，距离 {{item.routeDistanceMeters}} 米</text></text>
+      </view>
+      <text wx:for="{{audit.warnings}}" wx:key="*this" class="warning">提醒：{{item}}</text>
     </view>
 
     <view class="section-card">

@@ -1,6 +1,6 @@
 import type { DailyWeather } from './weather';
 import type { Place } from './place';
-import type { RouteEstimate } from './route';
+import type { RouteEstimate, RouteMode, RouteOrderDecisionReason } from './route';
 import type { PaginationMeta } from './api';
 
 /** Kinds of entries that may appear in a generated itinerary. */
@@ -272,6 +272,62 @@ export interface OptimizeTripPlanDayResult {
   readonly status: 'ready';
   readonly plan: TripPlan;
   readonly summary: TripPlanVersionSummary;
+}
+
+/** Input for the read-only audit of one saved optimization result. */
+export interface GetTripPlanOptimizationAuditInput {
+  readonly dayNumber: number;
+  /** Optional source version used to verify the audit provenance. */
+  readonly sourceVersion?: number;
+}
+
+/** One candidate considered by the nearest-neighbor decision. */
+export interface TripPlanOptimizationCandidate {
+  readonly destinationItemId: string;
+  readonly status: 'available' | 'unavailable';
+  readonly durationSeconds?: number;
+  readonly distanceMeters?: number;
+  readonly rejectionReason?: string;
+}
+
+/** One deterministic nearest-neighbor decision, in final order. */
+export interface TripPlanOptimizationDecision {
+  readonly step: number;
+  readonly originItemId: string;
+  readonly selectedDestinationItemId: string;
+  readonly reason: RouteOrderDecisionReason;
+  readonly candidates: TripPlanOptimizationCandidate[];
+}
+
+/** A persisted timeline fact compared with the source snapshot. */
+export interface TripPlanOptimizationTimelineChange {
+  readonly itemId: string;
+  readonly previousStartTime: string;
+  readonly previousEndTime: string;
+  readonly nextStartTime: string;
+  readonly nextEndTime: string;
+  readonly routeStatus: 'available' | 'unavailable' | 'not_applicable';
+  readonly routeDurationSeconds?: number;
+  readonly routeDistanceMeters?: number;
+}
+
+/** Read-only, explainable replay of an already persisted optimization. */
+export interface TripPlanOptimizationAuditResult {
+  readonly tripId: string;
+  readonly version: number;
+  /** Ready source snapshot used to prove the before-times and provenance. */
+  readonly sourceVersion: number;
+  readonly dayNumber: number;
+  readonly mode: RouteMode;
+  readonly algorithm: 'nearest_neighbor';
+  readonly isOptimal: false;
+  readonly orderedItemIds: string[];
+  readonly fixedStartItemId?: string;
+  readonly fixedEndItemId?: string;
+  readonly decisions: TripPlanOptimizationDecision[];
+  readonly timelineChanges: TripPlanOptimizationTimelineChange[];
+  readonly warnings: string[];
+  readonly generatedAt: string;
 }
 
 /** Public names for the edit whitelist; values are intentionally not user-extensible. */

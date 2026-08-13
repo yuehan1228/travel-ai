@@ -13,6 +13,7 @@ import type {
   TripPlanGenerationResult,
   TripPlanVersionStatus,
   TripPlanVersionSummary,
+  TripPlanOptimizationAuditResult,
   TripStatus,
 } from '@travel-guide/shared-types';
 
@@ -178,6 +179,18 @@ export interface TripPlanRepository {
     tripId: string,
     version: number,
   ): Promise<TripPlanVersionRecord | undefined>;
+
+  /**
+   * Optional persisted optimization evidence. TASK-024 snapshots did not store
+   * RouteMatrix/RouteOrder candidates, so the default adapter returns undefined
+   * and callers must fail closed with AUDIT_UNAVAILABLE.
+   */
+  findOptimizationAuditForUser?(
+    userId: string,
+    tripId: string,
+    version: number,
+    dayNumber: number,
+  ): Promise<TripPlanOptimizationAuditResult | undefined>;
 }
 
 export type TripPlanVersionRepository = TripPlanRepository;
@@ -1113,6 +1126,21 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
       .limit(1);
     const row = rows[0];
     return row === undefined ? undefined : toRecord(row.version);
+  }
+
+  public async findOptimizationAuditForUser(
+    userId: string,
+    tripId: string,
+    version: number,
+    dayNumber: number,
+  ): Promise<TripPlanOptimizationAuditResult | undefined> {
+    void userId;
+    void tripId;
+    void version;
+    void dayNumber;
+    // No TASK-024 migration persisted the RouteMatrix/RouteOrder explanation.
+    // Do not reconstruct candidate measurements from the final TripPlan legs.
+    return undefined;
   }
 
   public toGenerationResult(record: TripPlanVersionRecord): TripPlanGenerationResult {

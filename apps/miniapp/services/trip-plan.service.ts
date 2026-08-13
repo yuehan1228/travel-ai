@@ -19,6 +19,8 @@ import {
   ReorderTripPlanItemsResultSchema,
   OptimizeTripPlanDayInputSchema,
   OptimizeTripPlanDayResultSchema,
+  GetTripPlanOptimizationAuditInputSchema,
+  TripPlanOptimizationAuditResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
   EditTripPlanInput,
@@ -39,6 +41,8 @@ import type {
   ReorderTripPlanItemsResult,
   OptimizeTripPlanDayInput,
   OptimizeTripPlanDayResult,
+  GetTripPlanOptimizationAuditInput,
+  TripPlanOptimizationAuditResult,
 } from '@travel-guide/shared-types';
 
 import { AuthService, authService } from './auth.service';
@@ -317,6 +321,43 @@ export class TripPlanService {
       throw new RequestError({ code: 'INVALID_RESPONSE', message: 'Optimization result mismatch' });
     }
     return result;
+  }
+
+  public async getTripPlanOptimizationAudit(
+    id: string,
+    version: number,
+    input: GetTripPlanOptimizationAuditInput,
+  ): Promise<TripPlanOptimizationAuditResult>;
+  public async getTripPlanOptimizationAudit(
+    id: string,
+    version: number,
+    dayNumber: number,
+  ): Promise<TripPlanOptimizationAuditResult>;
+  public async getTripPlanOptimizationAudit(
+    id: string,
+    version: number,
+    inputOrDayNumber: GetTripPlanOptimizationAuditInput | number,
+  ): Promise<TripPlanOptimizationAuditResult> {
+    const tripId = TripIdSchema.parse(id);
+    const parsedVersion = parseVersion(version);
+    const input: GetTripPlanOptimizationAuditInput =
+      typeof inputOrDayNumber === 'number' ? { dayNumber: inputOrDayNumber } : inputOrDayNumber;
+    const parsedInput = GetTripPlanOptimizationAuditInputSchema.parse(input);
+    if (parsedInput.sourceVersion !== undefined && parsedInput.sourceVersion === parsedVersion) {
+      throw new RequestError({
+        code: 'INVALID_RESPONSE',
+        message: 'Audit source version must differ from the audited version',
+      });
+    }
+    const query = [`dayNumber=${parsedInput.dayNumber}`];
+    if (parsedInput.sourceVersion !== undefined) {
+      query.push(`sourceVersion=${parsedInput.sourceVersion}`);
+    }
+    return this.request<TripPlanOptimizationAuditResult>({
+      method: 'GET',
+      path: `/trips/${encodeURIComponent(tripId)}/plan/${parsedVersion}/optimize-audit?${query.join('&')}`,
+      schema: TripPlanOptimizationAuditResultSchema,
+    });
   }
 
   private async request<TResponse>(options: RequestOptions<TResponse>): Promise<TResponse> {

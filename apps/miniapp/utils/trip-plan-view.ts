@@ -10,6 +10,7 @@ import {
   ReorderTripPlanItemsResultSchema,
   OptimizeTripPlanDayResultSchema,
   TripPlanVersionListResultSchema,
+  TripPlanOptimizationAuditResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
   DailyWeather,
@@ -31,6 +32,7 @@ import type {
   TripPlanVersionDiffResult,
   ReorderTripPlanItemsResult,
   OptimizeTripPlanDayResult,
+  TripPlanOptimizationAuditResult,
 } from '@travel-guide/shared-types';
 import { z } from 'zod';
 
@@ -129,7 +131,102 @@ export interface TripPlanViewState {
   readonly restoringVersion?: number;
   readonly isEditing: boolean;
   readonly editInput?: EditTripPlanInput;
+  readonly audit?: TripPlanOptimizationAuditResult;
+  readonly auditDayNumber?: number;
+  readonly isAuditLoading: boolean;
 }
+
+export interface TripPlanOptimizationAuditCandidateDisplay {
+  readonly destinationLabel: string;
+  readonly status: TripPlanOptimizationAuditResult['decisions'][number]['candidates'][number]['status'];
+  readonly durationSeconds?: number;
+  readonly distanceMeters?: number;
+  readonly rejectionReason?: string;
+}
+
+export interface TripPlanOptimizationAuditDecisionDisplay {
+  readonly step: number;
+  readonly originLabel: string;
+  readonly selectedDestinationLabel: string;
+  readonly reason: TripPlanOptimizationAuditResult['decisions'][number]['reason'];
+  readonly candidates: TripPlanOptimizationAuditCandidateDisplay[];
+}
+
+export interface TripPlanOptimizationAuditTimelineDisplay {
+  readonly itemLabel: string;
+  readonly previousStartTime: string;
+  readonly previousEndTime: string;
+  readonly nextStartTime: string;
+  readonly nextEndTime: string;
+  readonly routeStatus: TripPlanOptimizationAuditResult['timelineChanges'][number]['routeStatus'];
+  readonly routeDurationSeconds?: number;
+  readonly routeDistanceMeters?: number;
+}
+
+/** User-facing audit projection; internal UUIDs never cross into the WXML layer. */
+export interface TripPlanOptimizationAuditDisplayModel {
+  readonly dayNumber: number;
+  readonly mode: TripPlanOptimizationAuditResult['mode'];
+  readonly algorithm: TripPlanOptimizationAuditResult['algorithm'];
+  readonly fixedStartLabel?: string;
+  readonly fixedEndLabel?: string;
+  readonly decisions: TripPlanOptimizationAuditDecisionDisplay[];
+  readonly timelineChanges: TripPlanOptimizationAuditTimelineDisplay[];
+  readonly warnings: string[];
+}
+
+export const createTripPlanOptimizationAuditDisplayModel = (
+  audit: TripPlanOptimizationAuditResult,
+  plan: TripPlan | undefined,
+): TripPlanOptimizationAuditDisplayModel => {
+  const nameById = new Map(
+    plan?.days.flatMap((day) => day.items).map((item) => [item.id, item.name]) ?? [],
+  );
+  const label = (itemId: string): string => nameById.get(itemId) ?? '未知条目';
+  return {
+    dayNumber: audit.dayNumber,
+    mode: audit.mode,
+    algorithm: audit.algorithm,
+    ...(audit.fixedStartItemId === undefined
+      ? {}
+      : { fixedStartLabel: label(audit.fixedStartItemId) }),
+    ...(audit.fixedEndItemId === undefined ? {} : { fixedEndLabel: label(audit.fixedEndItemId) }),
+    decisions: audit.decisions.map((decision) => ({
+      step: decision.step,
+      originLabel: label(decision.originItemId),
+      selectedDestinationLabel: label(decision.selectedDestinationItemId),
+      reason: decision.reason,
+      candidates: decision.candidates.map((candidate) => ({
+        destinationLabel: label(candidate.destinationItemId),
+        status: candidate.status,
+        ...(candidate.durationSeconds === undefined
+          ? {}
+          : { durationSeconds: candidate.durationSeconds }),
+        ...(candidate.distanceMeters === undefined
+          ? {}
+          : { distanceMeters: candidate.distanceMeters }),
+        ...(candidate.rejectionReason === undefined
+          ? {}
+          : { rejectionReason: candidate.rejectionReason }),
+      })),
+    })),
+    timelineChanges: audit.timelineChanges.map((change) => ({
+      itemLabel: label(change.itemId),
+      previousStartTime: change.previousStartTime,
+      previousEndTime: change.previousEndTime,
+      nextStartTime: change.nextStartTime,
+      nextEndTime: change.nextEndTime,
+      routeStatus: change.routeStatus,
+      ...(change.routeDurationSeconds === undefined
+        ? {}
+        : { routeDurationSeconds: change.routeDurationSeconds }),
+      ...(change.routeDistanceMeters === undefined
+        ? {}
+        : { routeDistanceMeters: change.routeDistanceMeters }),
+    })),
+    warnings: [...audit.warnings],
+  };
+};
 
 export interface TripPlanViewStateRegistry<TPage extends object> {
   get(page: TPage): TripPlanViewState | undefined;
@@ -168,6 +265,9 @@ export const createTripPlanViewState = (tripId: string): TripPlanViewState => ({
   restoringVersion: undefined,
   isEditing: false,
   editInput: undefined,
+  audit: undefined,
+  auditDayNumber: undefined,
+  isAuditLoading: false,
 });
 
 export const getVisibleTripPlanVersions = (
@@ -249,6 +349,54 @@ export const parseTripPlanOptimizeResult = (value: unknown): OptimizeTripPlanDay
   return parsed.data;
 };
 
+export const parseTripPlanOptimizationAuditResult = (
+  value: unknown,
+): TripPlanOptimizationAuditResult => {
+  const parsed = TripPlanOptimizationAuditResultSchema.safeParse(value);
+  if (!parsed.success) throw invalidTripPlanResponse();
+  return parsed.data;
+};
+
+export const beginTripPlanOptimizationAudit = (
+  state: TripPlanViewState,
+  dayNumber: number,
+): TripPlanViewState =>
+  state.isAuditLoading ||
+  state.isSwitching ||
+  state.regeneratingDay !== undefined ||
+  state.optimizingDay !== undefined ||
+  state.replacingItem !== undefined ||
+  state.reorderingItem !== undefined ||
+  state.isEditing ||
+  state.isDiffLoading ||
+  state.restoringVersion !== undefined ||
+  state.status !== 'ready' ||
+  !Number.isSafeInteger(dayNumber) ||
+  dayNumber < 1 ||
+  dayNumber > 14
+    ? state
+    : { ...state, isAuditLoading: true, auditDayNumber: dayNumber, errorMessage: '' };
+
+export const applyTripPlanOptimizationAuditResult = (
+  state: TripPlanViewState,
+  result: TripPlanOptimizationAuditResult,
+): TripPlanViewState => {
+  const parsed = parseTripPlanOptimizationAuditResult(result);
+  if (
+    parsed.tripId !== state.tripId ||
+    (state.selectedVersion !== undefined && parsed.version !== state.selectedVersion)
+  ) {
+    throw invalidTripPlanResponse();
+  }
+  return {
+    ...state,
+    audit: parsed,
+    auditDayNumber: parsed.dayNumber,
+    isAuditLoading: false,
+    errorMessage: '',
+  };
+};
+
 export const beginTripPlanOptimization = (
   state: TripPlanViewState,
   dayNumber: number,
@@ -295,6 +443,9 @@ export const applyTripPlanOptimizationResult = (
     diffToVersion: undefined,
     isDiffLoading: false,
     restoringVersion: undefined,
+    audit: undefined,
+    auditDayNumber: undefined,
+    isAuditLoading: false,
     errorMessage: '',
   };
 };
@@ -417,6 +568,9 @@ export const applyTripPlanReorderResult = (
     diffToVersion: undefined,
     isDiffLoading: false,
     restoringVersion: undefined,
+    audit: undefined,
+    auditDayNumber: undefined,
+    isAuditLoading: false,
     errorMessage: '',
   };
 };
@@ -433,6 +587,9 @@ export const beginTripPlanLoad = (state: TripPlanViewState): TripPlanViewState =
   errorMessage: '',
   isDiffLoading: false,
   restoringVersion: undefined,
+  audit: undefined,
+  auditDayNumber: undefined,
+  isAuditLoading: false,
 });
 
 export const beginTripPlanVersionSwitch = (state: TripPlanViewState): TripPlanViewState =>
@@ -446,6 +603,9 @@ export const beginTripPlanVersionSwitch = (state: TripPlanViewState): TripPlanVi
         replacingItem: undefined,
         reorderingItem: undefined,
         reorderDrafts: {},
+        audit: undefined,
+        auditDayNumber: undefined,
+        isAuditLoading: false,
         errorMessage: '',
       };
 
@@ -591,6 +751,9 @@ export const applyTripPlanEditResult = (
     isDiffLoading: false,
     restoringVersion: undefined,
     reorderDrafts: {},
+    audit: undefined,
+    auditDayNumber: undefined,
+    isAuditLoading: false,
     errorMessage: '',
   };
 };
@@ -644,6 +807,9 @@ export const applyLatestTripPlanResult = (
     isDiffLoading: false,
     restoringVersion: undefined,
     reorderDrafts: {},
+    audit: undefined,
+    auditDayNumber: undefined,
+    isAuditLoading: false,
   };
 };
 
@@ -690,6 +856,9 @@ export const applyTripPlanItemReplacementResult = (
     diffToVersion: undefined,
     isDiffLoading: false,
     restoringVersion: undefined,
+    audit: undefined,
+    auditDayNumber: undefined,
+    isAuditLoading: false,
     errorMessage: '',
   };
 };
@@ -724,6 +893,9 @@ export const applyTripPlanVersionResult = (
     diffFromVersion: undefined,
     diffToVersion: undefined,
     isDiffLoading: false,
+    audit: undefined,
+    auditDayNumber: undefined,
+    isAuditLoading: false,
     errorMessage: '',
   };
 };
@@ -763,6 +935,9 @@ export const applyTripPlanDayRegenerationResult = (
     diffFromVersion: undefined,
     diffToVersion: undefined,
     isDiffLoading: false,
+    audit: undefined,
+    auditDayNumber: undefined,
+    isAuditLoading: false,
     errorMessage: '',
   };
 };
@@ -781,6 +956,7 @@ export const applyTripPlanViewError = (
   reorderingItem: undefined,
   isDiffLoading: false,
   restoringVersion: undefined,
+  isAuditLoading: false,
   errorMessage,
 });
 
@@ -818,6 +994,12 @@ export const getTripPlanUserMessage = (error: unknown): string => {
       return '调整顺序所需的真实路线暂时不可用，请稍后重试。';
     case 'TRIP_PLAN_OPTIMIZE_UNAVAILABLE':
       return '自动优化所需的真实路线暂时不可用，请稍后重试。';
+    case 'TRIP_PLAN_AUDIT_NOT_FOUND':
+      return '该日期暂时没有可查看的优化依据。';
+    case 'TRIP_PLAN_AUDIT_UNAVAILABLE':
+      return '该版本未保存完整的路线优化依据，暂时无法回放。';
+    case 'TRIP_PLAN_AUDIT_VALIDATION_ERROR':
+      return '优化依据校验失败，请重新加载攻略。';
     case 'TRIP_PLAN_PROVIDER_ERROR':
     case 'TRIP_PLAN_OUTPUT_INVALID':
     case 'TRIP_PLAN_ENTITY_MISMATCH':

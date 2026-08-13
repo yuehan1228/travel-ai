@@ -15,6 +15,8 @@ import {
   ReorderTripPlanItemsResultSchema,
   OptimizeTripPlanDayInputSchema,
   OptimizeTripPlanDayResultSchema,
+  GetTripPlanOptimizationAuditInputSchema,
+  TripPlanOptimizationAuditResultSchema,
   RegenerateTripPlanDayInputSchema,
   RegenerateTripPlanDayResultSchema,
   RestoreTripPlanVersionInputSchema,
@@ -64,6 +66,8 @@ import type {
   ReorderTripPlanItemsResult,
   OptimizeTripPlanDayInput,
   OptimizeTripPlanDayResult,
+  GetTripPlanOptimizationAuditInput,
+  TripPlanOptimizationAuditResult,
   Place,
   TripPlanItem,
 } from '@travel-guide/shared-types';
@@ -193,6 +197,27 @@ const optimizeUnavailableError = (): TripPlanException =>
     'TRIP_PLAN_OPTIMIZE_UNAVAILABLE',
     422,
     'A complete real route order is unavailable for the requested day',
+  );
+
+const auditNotFoundError = (): TripPlanException =>
+  new TripPlanException(
+    'TRIP_PLAN_AUDIT_NOT_FOUND',
+    404,
+    'The requested TripPlan optimization audit was not found',
+  );
+
+const auditValidationError = (): TripPlanException =>
+  new TripPlanException(
+    'TRIP_PLAN_AUDIT_VALIDATION_ERROR',
+    422,
+    'The saved TripPlan optimization audit is invalid',
+  );
+
+const auditUnavailableError = (): TripPlanException =>
+  new TripPlanException(
+    'TRIP_PLAN_AUDIT_UNAVAILABLE',
+    422,
+    'Optimization audit evidence is unavailable for this TripPlan version',
   );
 
 const MAX_REPLACEMENT_CANDIDATE_PAGES = 50;
@@ -555,6 +580,208 @@ const validateOrderAgainstMatrix = (
       cell.estimate.destination.location.latitude === leg.estimate.destination.location.latitude
     );
   });
+};
+
+const sameStringArray = (left: readonly string[], right: readonly string[]): boolean =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
+const validateOptimizationAuditFacts = (
+  audit: TripPlanOptimizationAuditResult,
+  plan: TripPlan,
+  sourcePlan: TripPlan | undefined,
+  version: number,
+  expectedMode: 'walking' | 'driving',
+): boolean => {
+  if (
+    audit.tripId !== plan.tripId ||
+    audit.version !== version ||
+    audit.mode !== expectedMode ||
+    audit.algorithm !== 'nearest_neighbor' ||
+    audit.isOptimal !== false
+  ) {
+    return false;
+  }
+  const day = plan.days.find((candidate) => candidate.dayNumber === audit.dayNumber);
+  if (day === undefined) return false;
+  const itemIds = day.items.map((item) => item.id);
+  if (!sameStringArray(audit.orderedItemIds, itemIds)) return false;
+  const itemById = new Map(day.items.map((item) => [item.id, item]));
+  const orderedRealIds = itemIds.filter((itemId) => itemById.get(itemId)?.place !== undefined);
+  if (
+    (audit.fixedStartItemId !== undefined && !itemById.has(audit.fixedStartItemId)) ||
+    (audit.fixedEndItemId !== undefined && !itemById.has(audit.fixedEndItemId)) ||
+    (audit.fixedStartItemId !== undefined && audit.fixedStartItemId === audit.fixedEndItemId)
+  ) {
+    return false;
+  }
+  if (audit.decisions.length !== Math.max(0, orderedRealIds.length - 1)) return false;
+  for (const [index, decision] of audit.decisions.entries()) {
+    if (
+      decision.step !== index + 1 ||
+      decision.originItemId !== orderedRealIds[index] ||
+      decision.selectedDestinationItemId !== orderedRealIds[index + 1]
+    ) {
+      return false;
+    }
+    if (!itemById.has(decision.originItemId) || !itemById.has(decision.selectedDestinationItemId)) {
+      return false;
+    }
+    if (
+      itemById.get(decision.originItemId)?.place === undefined ||
+      itemById.get(decision.selectedDestinationItemId)?.place === undefined
+    ) {
+      return false;
+    }
+    if (
+      decision.candidates.some(
+        (candidate) => itemById.get(candidate.destinationItemId)?.place === undefined,
+      )
+    ) {
+      return false;
+    }
+    const expectedCandidateIds = orderedRealIds.slice(index + 1);
+    const actualCandidateIds = decision.candidates
+      .map((candidate) => candidate.destinationItemId)
+      .sort();
+    if (!sameStringArray(actualCandidateIds, [...expectedCandidateIds].sort())) return false;
+    const selected = decision.candidates.find(
+      (candidate) => candidate.destinationItemId === decision.selectedDestinationItemId,
+    );
+    if (selected === undefined || selected.status !== 'available') return false;
+    if (
+      decision.candidates.some((candidate) => candidate.destinationItemId === decision.originItemId)
+    ) {
+      return false;
+    }
+    const selectedItem = itemById.get(decision.selectedDestinationItemId);
+    const selectedRoute = selectedItem?.route;
+    if (
+      selectedRoute === undefined ||
+      selectedRoute.dataSource === 'unavailable' ||
+      selectedRoute.mode !== expectedMode ||
+      selected.durationSeconds !== selectedRoute.durationSeconds ||
+      selected.distanceMeters !== selectedRoute.distanceMeters
+    ) {
+      return false;
+    }
+
+    const available = decision.candidates.filter(
+      (candidate) => candidate.status === 'available' && candidate.rejectionReason !== 'fixed_end',
+    );
+    if (available.length === 0) return false;
+    for (const candidate of decision.candidates) {
+      if (candidate.status === 'unavailable') {
+        if (candidate.rejectionReason !== 'route_unavailable') return false;
+      } else if (
+        candidate.rejectionReason !== undefined &&
+        (candidate.rejectionReason !== 'fixed_end' ||
+          candidate.destinationItemId !== audit.fixedEndItemId)
+      ) {
+        return false;
+      }
+    }
+    const minDuration = Math.min(...available.map((candidate) => candidate.durationSeconds!));
+    const sameDuration = available.filter(
+      (candidate) => candidate.durationSeconds === selected.durationSeconds,
+    );
+    const minDistance = Math.min(...sameDuration.map((candidate) => candidate.distanceMeters!));
+    const sameDistance = sameDuration.filter(
+      (candidate) => candidate.distanceMeters === selected.distanceMeters,
+    );
+    if (selected.durationSeconds !== minDuration) return false;
+    if (decision.reason === 'fixed_end') {
+      if (
+        index !== audit.decisions.length - 1 ||
+        audit.fixedEndItemId !== decision.selectedDestinationItemId ||
+        selected.rejectionReason !== undefined
+      ) {
+        return false;
+      }
+    } else if (decision.reason === 'shortest_duration') {
+      if (sameDuration.length !== 1) return false;
+    } else if (decision.reason === 'shortest_distance_tiebreaker') {
+      if (
+        sameDuration.length < 2 ||
+        sameDistance.length !== 1 ||
+        selected.distanceMeters !== minDistance
+      ) {
+        return false;
+      }
+    } else if (decision.reason === 'destination_id_tiebreaker') {
+      if (
+        sameDuration.length < 2 ||
+        sameDistance.length < 2 ||
+        selected.distanceMeters !== minDistance
+      ) {
+        return false;
+      }
+      const idWinner = [...sameDistance].map((candidate) => candidate.destinationItemId).sort()[0];
+      if (selected.destinationItemId !== idWinner) return false;
+    }
+  }
+
+  const sourceDay = sourcePlan?.days.find((candidate) => candidate.dayNumber === audit.dayNumber);
+  const sourceItems =
+    sourceDay === undefined ? undefined : new Map(sourceDay.items.map((item) => [item.id, item]));
+  if (
+    sourcePlan !== undefined &&
+    (sourceItems === undefined ||
+      sourceItems.size !== itemById.size ||
+      [...itemById.keys()].some((itemId) => !sourceItems.has(itemId)))
+  ) {
+    return false;
+  }
+  const seenTimelineIds = new Set<string>();
+  for (const change of audit.timelineChanges) {
+    if (seenTimelineIds.has(change.itemId)) return false;
+    seenTimelineIds.add(change.itemId);
+    const item = itemById.get(change.itemId);
+    if (item === undefined) return false;
+    if (change.nextStartTime !== item.startTime || change.nextEndTime !== item.endTime)
+      return false;
+    const previous = sourceItems?.get(change.itemId);
+    if (
+      previous !== undefined &&
+      (change.previousStartTime !== previous.startTime ||
+        change.previousEndTime !== previous.endTime)
+    ) {
+      return false;
+    }
+    const route = item.route;
+    if (route === undefined) {
+      if (change.routeStatus !== 'not_applicable') return false;
+    } else if (route.dataSource === 'unavailable') {
+      if (change.routeStatus !== 'unavailable') return false;
+    } else if (
+      change.routeStatus !== 'available' ||
+      change.routeDurationSeconds !== route.durationSeconds ||
+      change.routeDistanceMeters !== route.distanceMeters ||
+      route.mode !== expectedMode
+    ) {
+      return false;
+    } else {
+      if (
+        item.place !== undefined &&
+        route.destination.placeId !== undefined &&
+        route.destination.placeId !== item.place.id
+      ) {
+        return false;
+      }
+      const itemIndex = itemIds.indexOf(change.itemId);
+      const previousPlace = day.items
+        .slice(0, itemIndex)
+        .reverse()
+        .find((candidate) => candidate.place !== undefined)?.place;
+      if (
+        previousPlace !== undefined &&
+        route.origin.placeId !== undefined &&
+        route.origin.placeId !== previousPlace.id
+      ) {
+        return false;
+      }
+    }
+  }
+  return seenTimelineIds.size === day.items.length && audit.generatedAt === plan.generatedAt;
 };
 
 const validateMatrixAgainstPoints = (
@@ -1930,6 +2157,109 @@ export class TripPlanService {
     const parsedResult = TripPlanGenerationResultSchema.safeParse(result);
     if (!parsedResult.success) throw persistenceError();
     return parsedResult.data;
+  }
+
+  /**
+   * Read an already persisted optimization explanation without performing any
+   * reservation, write, route lookup, or provider call. TASK-024 did not
+   * persist RouteMatrix/RouteOrder candidates, so the default repository
+   * deliberately returns TRIP_PLAN_AUDIT_UNAVAILABLE.
+   */
+  public async getTripPlanOptimizationAudit(
+    userId: string,
+    tripId: string,
+    version: number,
+    input: GetTripPlanOptimizationAuditInput,
+  ): Promise<TripPlanOptimizationAuditResult> {
+    this.assertTripId(tripId);
+    if (!Number.isSafeInteger(version) || version < 1 || version > 2_147_483_647) {
+      throw validationError();
+    }
+    const parsedInput = GetTripPlanOptimizationAuditInputSchema.safeParse(input);
+    if (!parsedInput.success) throw validationError();
+    if (
+      parsedInput.data.sourceVersion !== undefined &&
+      parsedInput.data.sourceVersion === version
+    ) {
+      throw validationError();
+    }
+
+    const trip = await this.requireTripForVersionOperation(userId, tripId);
+    let record: TripPlanVersionRecord | undefined;
+    try {
+      record = await this.repository.findVersionForUser(userId, tripId, version);
+    } catch {
+      throw persistenceError();
+    }
+    if (record === undefined || record.status !== 'ready' || record.plan === undefined) {
+      throw planNotFoundError();
+    }
+    const parsedPlan = TripPlanSchema.safeParse(record.plan);
+    if (!parsedPlan.success || parsedPlan.data.tripId !== tripId) {
+      throw auditValidationError();
+    }
+    if (!parsedPlan.data.days.some((day) => day.dayNumber === parsedInput.data.dayNumber)) {
+      throw auditNotFoundError();
+    }
+
+    const findAudit = this.repository.findOptimizationAuditForUser;
+    if (findAudit === undefined) throw auditUnavailableError();
+    let rawAudit: TripPlanOptimizationAuditResult | undefined;
+    try {
+      rawAudit = await findAudit.call(
+        this.repository,
+        userId,
+        tripId,
+        version,
+        parsedInput.data.dayNumber,
+      );
+    } catch {
+      throw persistenceError();
+    }
+    if (rawAudit === undefined) throw auditUnavailableError();
+    const parsedAudit = TripPlanOptimizationAuditResultSchema.safeParse(rawAudit);
+    if (!parsedAudit.success) throw auditValidationError();
+    if (
+      parsedInput.data.sourceVersion !== undefined &&
+      parsedAudit.data.sourceVersion !== parsedInput.data.sourceVersion
+    ) {
+      throw auditValidationError();
+    }
+
+    if (parsedAudit.data.sourceVersion === version) throw auditValidationError();
+    let sourceRecord: TripPlanVersionRecord | undefined;
+    try {
+      sourceRecord = await this.repository.findVersionForUser(
+        userId,
+        tripId,
+        parsedAudit.data.sourceVersion,
+      );
+    } catch {
+      throw persistenceError();
+    }
+    if (sourceRecord?.status !== 'ready' || sourceRecord.plan === undefined) {
+      throw auditUnavailableError();
+    }
+    const parsedSource = TripPlanSchema.safeParse(sourceRecord.plan);
+    if (!parsedSource.success || parsedSource.data.tripId !== tripId) {
+      throw auditValidationError();
+    }
+    const sourcePlan = parsedSource.data;
+
+    const expectedMode =
+      trip.inputSnapshot.transportPreference === 'driving' ? 'driving' : 'walking';
+    if (
+      !validateOptimizationAuditFacts(
+        parsedAudit.data,
+        parsedPlan.data,
+        sourcePlan,
+        version,
+        expectedMode,
+      )
+    ) {
+      throw auditValidationError();
+    }
+    return parsedAudit.data;
   }
 
   public generateTripPlan(

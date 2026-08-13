@@ -12,6 +12,7 @@ import type {
   TripPlanItemReplacementCandidateList,
   ReplaceTripPlanItemResult,
   ReorderTripPlanItemsResult,
+  TripPlanOptimizationAuditResult,
 } from '@travel-guide/shared-types';
 
 import { createHttpClient, type RequestAdapter } from '../services/http-client';
@@ -145,6 +146,29 @@ const reorderResult: ReorderTripPlanItemsResult = {
   plan,
   summary: { ...summary, id: '623e4567-e89b-12d3-a456-426614174000', version: 2 },
 };
+const auditResult: TripPlanOptimizationAuditResult = {
+  tripId,
+  version: 2,
+  sourceVersion: 1,
+  dayNumber: 1,
+  mode: 'walking',
+  algorithm: 'nearest_neighbor',
+  isOptimal: false,
+  orderedItemIds: ['523e4567-e89b-12d3-a456-426614174000'],
+  decisions: [],
+  timelineChanges: [
+    {
+      itemId: '523e4567-e89b-12d3-a456-426614174000',
+      previousStartTime: '09:00',
+      previousEndTime: '10:00',
+      nextStartTime: '09:00',
+      nextEndTime: '10:00',
+      routeStatus: 'not_applicable',
+    },
+  ],
+  warnings: ['Nearest-neighbor is deterministic but not globally optimal.'],
+  generatedAt,
+};
 
 const createAuth = (token: string | undefined): TripPlanAuthService & { loggedOut: boolean } => {
   const auth = {
@@ -164,6 +188,23 @@ const createClient = (adapter: RequestAdapter) =>
   );
 
 describe('miniapp TripPlanService', () => {
+  it('reads an optimization audit with Bearer auth and strict response validation', async () => {
+    const requests: Array<{ method: string; path: string; data: unknown }> = [];
+    const service = new TripPlanService(
+      createClient(async (options) => {
+        requests.push({ method: options.method, path: options.url, data: options.data });
+        return {
+          statusCode: 200,
+          data: { success: true, data: auditResult, requestId: 'audit-1' },
+        };
+      }),
+      createAuth('audit-token'),
+    );
+    await expect(service.getTripPlanOptimizationAudit(tripId, 2, 1)).resolves.toEqual(auditResult);
+    expect(requests[0]?.method).toBe('GET');
+    expect(requests[0]?.path).toContain('/trips/' + tripId + '/plan/2/optimize-audit?dayNumber=1');
+  });
+
   it('lists verified candidates and replaces an item with strict authenticated requests', async () => {
     const requests: Array<{ method: string; path: string; data: unknown }> = [];
     const service = new TripPlanService(

@@ -36,6 +36,8 @@ import {
   ReorderTripPlanItemsResultSchema,
   OptimizeTripPlanDayInputSchema,
   OptimizeTripPlanDayResultSchema,
+  GetTripPlanOptimizationAuditInputSchema,
+  TripPlanOptimizationAuditResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
   ApiSuccess,
@@ -54,6 +56,8 @@ import type {
   ReplaceTripPlanItemResult,
   ReorderTripPlanItemsResult,
   OptimizeTripPlanDayResult,
+  GetTripPlanOptimizationAuditInput,
+  TripPlanOptimizationAuditResult,
 } from '@travel-guide/shared-types';
 
 import { getRequestId } from '../../http/request-context';
@@ -106,6 +110,32 @@ const parseDiffQuery = (query: unknown): TripPlanVersionDiffInput => {
   const parsed = TripPlanVersionDiffInputSchema.safeParse({
     fromVersion: parseQueryVersion(value.fromVersion),
     toVersion: parseQueryVersion(value.toVersion),
+  });
+  if (!parsed.success) throw validationError();
+  return parsed.data;
+};
+
+const parseOptimizationAuditQuery = (query: unknown): GetTripPlanOptimizationAuditInput => {
+  if (typeof query !== 'object' || query === null || Array.isArray(query)) {
+    throw validationError();
+  }
+  const value = query as Record<string, unknown>;
+  const keys = Object.keys(value).sort();
+  if (keys.some((key) => key !== 'dayNumber' && key !== 'sourceVersion')) {
+    throw validationError();
+  }
+  if (!Object.prototype.hasOwnProperty.call(value, 'dayNumber')) throw validationError();
+  const parseQueryNumber = (raw: unknown): number | undefined => {
+    if (typeof raw === 'number') return raw;
+    if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return undefined;
+    const parsed = Number(raw);
+    return Number.isSafeInteger(parsed) ? parsed : undefined;
+  };
+  const parsed = GetTripPlanOptimizationAuditInputSchema.safeParse({
+    dayNumber: parseQueryNumber(value.dayNumber),
+    ...(Object.prototype.hasOwnProperty.call(value, 'sourceVersion')
+      ? { sourceVersion: parseQueryNumber(value.sourceVersion) }
+      : {}),
   });
   if (!parsed.success) throw validationError();
   return parsed.data;
@@ -407,6 +437,31 @@ export class TripPlanController {
         'TRIP_PLAN_PERSISTENCE_ERROR',
         500,
         'TripPlan data could not be persisted',
+      );
+    return { success: true, data: validated.data, requestId: requestIdFor(request) };
+  }
+
+  @Get(':id/plan/:version/optimize-audit')
+  @HttpCode(HttpStatus.OK)
+  public async optimizeAudit(
+    @Param('id') tripId: string,
+    @Param('version') version: string,
+    @Query() query: unknown,
+    @CurrentUserId() userId: string,
+    @Req() request: FastifyRequest,
+  ): Promise<ApiSuccess<TripPlanOptimizationAuditResult>> {
+    const result = await this.service.getTripPlanOptimizationAudit(
+      userId,
+      parseTripId(tripId),
+      parseVersion(version),
+      parseOptimizationAuditQuery(query),
+    );
+    const validated = TripPlanOptimizationAuditResultSchema.safeParse(result);
+    if (!validated.success)
+      throw new TripPlanException(
+        'TRIP_PLAN_AUDIT_VALIDATION_ERROR',
+        422,
+        'The saved TripPlan optimization audit is invalid',
       );
     return { success: true, data: validated.data, requestId: requestIdFor(request) };
   }

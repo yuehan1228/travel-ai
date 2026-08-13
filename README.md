@@ -214,6 +214,12 @@ Trip 行级原子 reservation。成功保存递增的新不可变版本，失败
 `ROUTE_ORDER_PROVIDER_ERROR` 与 `ROUTE_ORDER_UNAVAILABLE`。小程序 `RouteOrderExplanationService` 复用现有认证和 HTTP Client，
 缺少 Token 时不会访问网络，Token 失效时清理认证状态。
 
+### TripPlan 自动优化只读审计（TASK-025）
+
+`GET /trips/:id/plan/:version/optimize-audit?dayNumber=...` 只读取当前用户的 `ready` 版本，不创建 reservation、版本或任何数据库写入，也不调用路线 Provider、地图、LLM 或天气服务。审计结果使用严格的 `TripPlanOptimizationAuditResultSchema` 展示 nearest-neighbor 的逐步候选、固定起终点、真实路线度量和时间前后对比，并明确该启发式不保证全局最优。
+
+TASK-024 的现有版本快照没有持久化完整 RouteMatrix/RouteOrder 候选证据，因此默认 Repository 对该接口稳定返回 `TRIP_PLAN_AUDIT_UNAVAILABLE`；系统不会从最终相邻路线伪造候选比较。小程序详情页保留当前攻略并以普通文本显示不可回放提示，认证失效继续清理 Bearer Token。
+
 ### 旅行需求草稿 API（TASK-008）
 
 所有 `/trips` 请求都必须携带 `Authorization: Bearer <access-token>`。服务端从

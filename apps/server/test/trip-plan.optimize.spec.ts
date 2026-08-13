@@ -12,6 +12,7 @@ import type {
   RouteMatrixResult,
   RouteOrderResult,
   TripPlan,
+  TripPlanOptimizationAuditResult,
 } from '@travel-guide/shared-types';
 
 import { TripPlanService } from '../src/modules/trip-plan/trip-plan.service';
@@ -327,6 +328,8 @@ const orderThree: RouteOrderResult = {
 
 class FakePlanRepository implements TripPlanRepository {
   public constructor(public readonly sourcePlan: TripPlan = plan()) {}
+  public targetPlan?: TripPlan;
+  public audit?: TripPlanOptimizationAuditResult;
   public failed = 0;
   public reserved = 0;
   public async reserveGeneration(): Promise<TripPlanGenerationReservationResult> {
@@ -380,17 +383,27 @@ class FakePlanRepository implements TripPlanRepository {
   public async listVersionsForUser(): Promise<TripPlanVersionRecord[]> {
     return [];
   }
-  public async findVersionForUser(): Promise<TripPlanVersionRecord> {
+  public async findVersionForUser(
+    _user: string,
+    _trip: string,
+    version: number,
+  ): Promise<TripPlanVersionRecord> {
     return {
       id: '823e4567-e89b-12d3-a456-426614174000',
       tripId,
-      version: 1,
+      version,
       schemaVersion: '1.0',
       status: 'ready',
-      plan: this.sourcePlan,
+      plan: version === 1 ? this.sourcePlan : this.targetPlan,
       generatedAt: now,
       createdAt: now,
     };
+  }
+
+  public async findOptimizationAuditForUser(): Promise<
+    TripPlanOptimizationAuditResult | undefined
+  > {
+    return this.audit;
   }
 }
 
@@ -470,6 +483,116 @@ const reversedPlan = (): TripPlan => {
 };
 
 describe('TripPlan same-day optimization', () => {
+  it('fails closed for read-only audit when the saved version has no matrix evidence', async () => {
+    const setup = createService();
+    await expect(
+      setup.service.getTripPlanOptimizationAudit(userId, tripId, 1, { dayNumber: 1 }),
+    ).rejects.toMatchObject({ code: 'TRIP_PLAN_AUDIT_UNAVAILABLE' });
+    expect(setup.events).toEqual([]);
+    expect(setup.repository.reserved).toBe(0);
+    expect(setup.repository.failed).toBe(0);
+  });
+
+  it('accepts only a complete persisted audit whose order and timeline match the ready snapshot', async () => {
+    const setup = createService();
+    const source = setup.repository.sourcePlan;
+    const target = TripPlanSchema.parse({
+      ...source,
+      days: [
+        {
+          ...source.days[0]!,
+          items: [
+            { ...source.days[0]!.items[1]!, startTime: '09:00', endTime: '10:00' },
+            {
+              ...source.days[0]!.items[0]!,
+              startTime: '10:02',
+              endTime: '11:02',
+              route: estimate,
+              dataSources: ['map_provider', 'route_provider'],
+            },
+          ],
+        },
+      ],
+    });
+    setup.repository.targetPlan = target;
+    setup.repository.audit = {
+      tripId,
+      version: 2,
+      sourceVersion: 1,
+      dayNumber: 1,
+      mode: 'walking',
+      algorithm: 'nearest_neighbor',
+      isOptimal: false,
+      orderedItemIds: [secondId, firstId],
+      decisions: [
+        {
+          step: 1,
+          originItemId: secondId,
+          selectedDestinationItemId: firstId,
+          reason: 'shortest_duration',
+          candidates: [
+            {
+              destinationItemId: firstId,
+              status: 'available',
+              durationSeconds: 120,
+              distanceMeters: 100,
+            },
+          ],
+        },
+      ],
+      timelineChanges: [
+        {
+          itemId: secondId,
+          previousStartTime: '10:30',
+          previousEndTime: '11:30',
+          nextStartTime: '09:00',
+          nextEndTime: '10:00',
+          routeStatus: 'not_applicable',
+        },
+        {
+          itemId: firstId,
+          previousStartTime: '09:00',
+          previousEndTime: '10:00',
+          nextStartTime: '10:02',
+          nextEndTime: '11:02',
+          routeStatus: 'available',
+          routeDurationSeconds: 120,
+          routeDistanceMeters: 100,
+        },
+      ],
+      warnings: ['Nearest-neighbor is deterministic but not globally optimal.'],
+      generatedAt: now.toISOString(),
+    };
+    const result = await setup.service.getTripPlanOptimizationAudit(userId, tripId, 2, {
+      dayNumber: 1,
+    });
+    expect(result.orderedItemIds).toEqual([secondId, firstId]);
+    setup.repository.audit = { ...setup.repository.audit, orderedItemIds: [firstId, secondId] };
+    await expect(
+      setup.service.getTripPlanOptimizationAudit(userId, tripId, 2, { dayNumber: 1 }),
+    ).rejects.toMatchObject({ code: 'TRIP_PLAN_AUDIT_VALIDATION_ERROR' });
+    setup.repository.audit = {
+      ...setup.repository.audit,
+      orderedItemIds: [secondId, firstId],
+      decisions: [
+        {
+          ...setup.repository.audit.decisions[0]!,
+          candidates: [
+            {
+              destinationItemId: firstId,
+              status: 'available',
+              durationSeconds: 121,
+              distanceMeters: 100,
+            },
+          ],
+        },
+      ],
+    };
+    await expect(
+      setup.service.getTripPlanOptimizationAudit(userId, tripId, 2, { dayNumber: 1 }),
+    ).rejects.toMatchObject({ code: 'TRIP_PLAN_AUDIT_VALIDATION_ERROR' });
+  });
+
   it('reserves before matrix/order, preserves amounts, and creates a new timed version', async () => {
     const setup = createService();
     const result = await setup.service.optimizeTripPlanDay(userId, tripId, 1, {

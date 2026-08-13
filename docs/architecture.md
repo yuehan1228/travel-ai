@@ -270,6 +270,12 @@ TripPlanService 在任何路线查询前通过 `operation='optimize-order'` 预�
 
 成功快照再次通过完整 `TripPlanSchema`，金额、预算、源版本和其他日期保持不变，并在事务中保存新的不可变 ready 版本。失败只留下 failed 元数据并恢复原 ready 状态；该 reservation 与生成、单日重生成、恢复、编辑、地点替换和手工顺序调整互斥。小程序详情页仅使用原生控件提供可选起点/终点、二次确认、单飞提交和失败保留，不增加地图、拖拽、HTML、导航、聊天、实时价格、Redis 或队列。
 
+### TripPlan 自动优化只读审计（TASK-025）
+
+`GET /trips/:id/plan/:version/optimize-audit` 受认证保护，查询始终带 `userId + tripId`，只读取 `ready` 版本，不创建 reservation、不写数据库，也不重新调用 RouteMatrix、地图 Provider、LLM 或天气。共享 strict Schema 将审计候选限制为：available 必须携带真实距离和耗时，unavailable 禁止携带伪造度量；decision 必须逐步对应最终顺序，timeline change 必须对应保存的时间和 RouteEstimate，并明确 nearest-neighbor 不保证全局最优。
+
+TASK-024 的 `trip_plan_versions` 只保存最终 TripPlan 快照，没有保存完整 RouteMatrix、候选排除原因或 RouteOrderExplanation。Repository 因而默认返回 `TRIP_PLAN_AUDIT_UNAVAILABLE`，服务端禁止从最终路线反推候选。保留可选的 evidence repository seam 供未来版本持久化完整审计事实；在证据存在时仍会重新通过完整 Schema、TripPlan、路线度量和可选 sourceVersion 快照校验，任何篡改均稳定失败。小程序详情页仅用原生文本显示可回放审计或证据缺失提示，失败不清空当前攻略，`AUTH_TOKEN_INVALID` 由统一 AuthService 清理。
+
 ### 小程序 TripPlan 生成流程与只读详情（TASK-018）
 
 首页提交由轻量表单状态转换为严格 `CreateTripInputSchema` 输入，先检查 `AuthService` 登录状态，再保存本地草稿并调用

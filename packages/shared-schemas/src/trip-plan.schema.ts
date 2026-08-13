@@ -30,6 +30,11 @@ import {
   type ReorderTripPlanItemsResult,
   type OptimizeTripPlanDayInput,
   type OptimizeTripPlanDayResult,
+  type GetTripPlanOptimizationAuditInput,
+  type TripPlanOptimizationCandidate,
+  type TripPlanOptimizationDecision,
+  type TripPlanOptimizationTimelineChange,
+  type TripPlanOptimizationAuditResult,
   type TripPlanGenerationResult,
   type TripPlanVersionListResult,
   type TripPlanVersionStatus,
@@ -1068,6 +1073,277 @@ export const ReorderTripPlanItemsResultSchema: z.ZodType<
         message: 'reordered plan generatedAt must match summary.generatedAt',
       });
     }
+  });
+
+const auditItemIdSchema = z.string().uuid();
+const auditTimeSchema = z.string().regex(TIME_PATTERN);
+const auditReasonSchema = z.enum([
+  'shortest_duration',
+  'shortest_distance_tiebreaker',
+  'destination_id_tiebreaker',
+  'fixed_end',
+]);
+const auditWarningSchema = createTrimmedRequiredStringSchema('warning', 256);
+
+/** Strict query input for GET .../optimize-audit. */
+export const GetTripPlanOptimizationAuditInputSchema: z.ZodType<
+  GetTripPlanOptimizationAuditInput,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
+    sourceVersion: positiveSafeIntegerSchema.optional(),
+  })
+  .strict();
+
+const tripPlanOptimizationCandidateSchema: z.ZodType<
+  TripPlanOptimizationCandidate,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    destinationItemId: auditItemIdSchema,
+    status: z.enum(['available', 'unavailable']),
+    durationSeconds: z.number().finite().int().nonnegative().optional(),
+    distanceMeters: z.number().finite().int().nonnegative().optional(),
+    rejectionReason: createOptionalTrimmedStringSchema('rejectionReason', 256),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.status === 'available') {
+      if (value.durationSeconds === undefined || value.distanceMeters === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['durationSeconds'],
+          message: 'available candidates require real duration and distance',
+        });
+      }
+      if (value.rejectionReason !== undefined && value.rejectionReason !== 'fixed_end') {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['rejectionReason'],
+          message: 'available candidates may only explain a held fixed end',
+        });
+      }
+    } else if (value.durationSeconds !== undefined || value.distanceMeters !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['status'],
+        message: 'unavailable candidates must not carry measurements',
+      });
+    }
+  });
+
+const tripPlanOptimizationDecisionSchema: z.ZodType<
+  TripPlanOptimizationDecision,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    step: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_ITEMS_PER_DAY),
+    originItemId: auditItemIdSchema,
+    selectedDestinationItemId: auditItemIdSchema,
+    reason: auditReasonSchema,
+    candidates: z
+      .array(tripPlanOptimizationCandidateSchema)
+      .min(1)
+      .max(MAX_TRIP_PLAN_ITEMS_PER_DAY),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.originItemId === value.selectedDestinationItemId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['selectedDestinationItemId'],
+        message: 'decision must not select its origin',
+      });
+    }
+    if (
+      !value.candidates.some(
+        (candidate) => candidate.destinationItemId === value.selectedDestinationItemId,
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['selectedDestinationItemId'],
+        message: 'selected destination must be listed as a candidate',
+      });
+    }
+    const ids = new Set<string>();
+    value.candidates.forEach((candidate, index) => {
+      if (ids.has(candidate.destinationItemId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['candidates', index, 'destinationItemId'],
+          message: 'candidates must be unique',
+        });
+      }
+      ids.add(candidate.destinationItemId);
+    });
+  });
+
+const tripPlanOptimizationTimelineChangeSchema: z.ZodType<
+  TripPlanOptimizationTimelineChange,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    itemId: auditItemIdSchema,
+    previousStartTime: auditTimeSchema,
+    previousEndTime: auditTimeSchema,
+    nextStartTime: auditTimeSchema,
+    nextEndTime: auditTimeSchema,
+    routeStatus: z.enum(['available', 'unavailable', 'not_applicable']),
+    routeDurationSeconds: z.number().finite().int().nonnegative().optional(),
+    routeDistanceMeters: z.number().finite().int().nonnegative().optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.routeStatus === 'available') {
+      if (value.routeDurationSeconds === undefined || value.routeDistanceMeters === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['routeDurationSeconds'],
+          message: 'available timeline routes require real measurements',
+        });
+      }
+    } else if (
+      value.routeDurationSeconds !== undefined ||
+      value.routeDistanceMeters !== undefined
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['routeStatus'],
+        message: 'non-available timeline routes must not carry measurements',
+      });
+    }
+  });
+
+export const TripPlanOptimizationCandidateSchema = tripPlanOptimizationCandidateSchema;
+export const TripPlanOptimizationDecisionSchema = tripPlanOptimizationDecisionSchema;
+export const TripPlanOptimizationTimelineChangeSchema = tripPlanOptimizationTimelineChangeSchema;
+
+export const TripPlanOptimizationAuditResultSchema: z.ZodType<
+  TripPlanOptimizationAuditResult,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    tripId: z.string().uuid(),
+    version: positiveSafeIntegerSchema,
+    sourceVersion: positiveSafeIntegerSchema,
+    dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
+    mode: z.enum(['walking', 'driving']),
+    algorithm: z.literal('nearest_neighbor'),
+    isOptimal: z.literal(false),
+    orderedItemIds: z.array(auditItemIdSchema).min(1).max(MAX_TRIP_PLAN_ITEMS_PER_DAY),
+    fixedStartItemId: auditItemIdSchema.optional(),
+    fixedEndItemId: auditItemIdSchema.optional(),
+    decisions: z.array(tripPlanOptimizationDecisionSchema).max(MAX_TRIP_PLAN_ITEMS_PER_DAY),
+    timelineChanges: z
+      .array(tripPlanOptimizationTimelineChangeSchema)
+      .min(1)
+      .max(MAX_TRIP_PLAN_ITEMS_PER_DAY),
+    warnings: z
+      .array(auditWarningSchema)
+      .min(1)
+      .max(32)
+      .refine(
+        (warnings) =>
+          warnings.some((warning) => /nearest[- ]neighbor/i.test(warning)) &&
+          warnings.some((warning) =>
+            /not globally optimal|does not guarantee (?:a )?globally optimal/i.test(warning),
+          ),
+        { message: 'warnings must explain nearest-neighbor is not globally optimal' },
+      ),
+    generatedAt: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      value.fixedStartItemId !== undefined &&
+      value.fixedEndItemId !== undefined &&
+      value.fixedStartItemId === value.fixedEndItemId
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['fixedEndItemId'],
+        message: 'fixed start and end must differ',
+      });
+    }
+    if (new Set(value.orderedItemIds).size !== value.orderedItemIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['orderedItemIds'],
+        message: 'orderedItemIds must be unique',
+      });
+    }
+    const directSequence = value.decisions.length === value.orderedItemIds.length - 1;
+    value.decisions.forEach((decision, index) => {
+      const expectedOrigin = directSequence
+        ? value.orderedItemIds[index]
+        : index === 0
+          ? decision.originItemId
+          : value.decisions[index - 1]?.selectedDestinationItemId;
+      const expectedDestination = directSequence
+        ? value.orderedItemIds[index + 1]
+        : decision.selectedDestinationItemId;
+      if (
+        decision.step !== index + 1 ||
+        decision.originItemId !== expectedOrigin ||
+        (directSequence
+          ? decision.selectedDestinationItemId !== expectedDestination
+          : decision.selectedDestinationItemId === decision.originItemId ||
+            !value.orderedItemIds.includes(decision.originItemId) ||
+            !value.orderedItemIds.includes(decision.selectedDestinationItemId))
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['decisions', index],
+          message: 'decisions must reference orderedItemIds in final order',
+        });
+      }
+    });
+    if (
+      value.fixedStartItemId !== undefined &&
+      value.decisions[0]?.originItemId !== value.fixedStartItemId
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['fixedStartItemId'],
+        message: 'fixed start must match the first real route decision',
+      });
+    }
+    if (
+      value.fixedEndItemId !== undefined &&
+      value.decisions[value.decisions.length - 1]?.selectedDestinationItemId !==
+        value.fixedEndItemId
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['fixedEndItemId'],
+        message: 'fixed end must match the last real route decision',
+      });
+    }
+    const timelineIds = new Set<string>();
+    value.timelineChanges.forEach((change, index) => {
+      if (!value.orderedItemIds.includes(change.itemId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['timelineChanges', index, 'itemId'],
+          message: 'timeline change must reference orderedItemIds',
+        });
+      }
+      if (timelineIds.has(change.itemId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['timelineChanges', index, 'itemId'],
+          message: 'timeline changes must be unique',
+        });
+      }
+      timelineIds.add(change.itemId);
+    });
   });
 
 export const TripPlanItemReplacementCandidateListResultSchema =

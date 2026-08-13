@@ -848,4 +848,38 @@ describe('TripPlan API boundary', () => {
       reorderFirstItemId,
     ]);
   });
+
+  it('keeps optimize audit read-only and fails closed without persisted matrix evidence', async () => {
+    const unauthenticated = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'GET',
+        url: `/trips/${validTripId}/plan/5/optimize-audit?dayNumber=1`,
+        headers: { 'x-request-id': 'trip-plan-audit-auth-1' },
+      });
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(unauthenticated.headers['x-request-id']).toBe('trip-plan-audit-auth-1');
+    expect(ApiFailureSchema.parse(JSON.parse(unauthenticated.payload)).error.code).toBe(
+      'AUTH_TOKEN_INVALID',
+    );
+
+    const token = await login();
+    const requestId = 'trip-plan-audit-unavailable-1';
+    const beforeRoutes = routeProvider.calls;
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'GET',
+        url: `/trips/${validTripId}/plan/5/optimize-audit?dayNumber=1`,
+        headers: { authorization: `Bearer ${token}`, 'x-request-id': requestId },
+      });
+    expect(response.statusCode).toBe(422);
+    expect(response.headers['x-request-id']).toBe(requestId);
+    const failure = ApiFailureSchema.parse(JSON.parse(response.payload));
+    expect(failure.requestId).toBe(requestId);
+    expect(failure.error.code).toBe('TRIP_PLAN_AUDIT_UNAVAILABLE');
+    expect(routeProvider.calls).toBe(beforeRoutes);
+  });
 });

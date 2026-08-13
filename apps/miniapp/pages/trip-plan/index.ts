@@ -23,6 +23,7 @@ import {
   applyTripPlanItemReorderDraft,
   applyTripPlanVersionResult,
   applyTripPlanOptimizationResult,
+  applyTripPlanOptimizationAuditResult,
   beginTripPlanLoad,
   beginTripPlanDayRegeneration,
   beginTripPlanItemReplacement,
@@ -32,6 +33,7 @@ import {
   beginTripPlanVersionSwitch,
   beginTripPlanVersionRestore,
   beginTripPlanOptimization,
+  beginTripPlanOptimizationAudit,
   createTripPlanDisplayModel,
   createTripPlanViewState,
   createTripPlanViewStateRegistry,
@@ -43,6 +45,8 @@ import {
   moveTripPlanItemInOrder,
   parseTripPlanRouteParams,
   restoreTripPlanItemReorderDraft,
+  createTripPlanOptimizationAuditDisplayModel,
+  type TripPlanOptimizationAuditDisplayModel,
   type TripPlanDisplayModel,
   type TripPlanViewState,
 } from '../../utils/trip-plan-view';
@@ -98,6 +102,9 @@ interface TripPlanPageData {
   replacementCandidates: Record<string, ReplacementCandidateView[]>;
   replacementLoadingItem?: string;
   replacementSelection: Record<string, string>;
+  audit?: TripPlanOptimizationAuditDisplayModel;
+  auditDayNumber?: number;
+  isAuditLoading: boolean;
 }
 
 interface ReplacementCandidateView {
@@ -232,6 +239,10 @@ const syncPage = (
             }),
           })),
         };
+  const auditDisplay =
+    state.audit === undefined
+      ? undefined
+      : createTripPlanOptimizationAuditDisplayModel(state.audit, state.plan);
   page.setData({
     tripId: state.tripId,
     status: state.status,
@@ -266,6 +277,9 @@ const syncPage = (
     replacementSelection: page.data.replacementSelection,
     optimizeStartItemIds: page.data.optimizeStartItemIds,
     optimizeEndItemIds: page.data.optimizeEndItemIds,
+    audit: auditDisplay,
+    auditDayNumber: state.auditDayNumber,
+    isAuditLoading: state.isAuditLoading,
   });
 };
 
@@ -493,6 +507,41 @@ const confirmTripPlanOptimization = (
       if (isTripPlanOptimizationConfirmationAccepted(result)) run();
     },
   });
+};
+
+const loadTripPlanOptimizationAudit = async (
+  page: PageInstance<TripPlanPageData>,
+  dayNumber: number,
+): Promise<void> => {
+  const state = getViewState(page);
+  if (
+    state.isAuditLoading ||
+    state.selectedVersion === undefined ||
+    page.data.tripId.length === 0 ||
+    state.status !== 'ready'
+  ) {
+    return;
+  }
+  let nextState = beginTripPlanOptimizationAudit(state, dayNumber);
+  if (nextState === state) return;
+  setViewState(page, nextState);
+  syncPage(page, nextState, page.data.plan);
+  try {
+    const result = await tripPlanService.getTripPlanOptimizationAudit(
+      page.data.tripId,
+      state.selectedVersion,
+      dayNumber,
+    );
+    if (!viewStates.has(page)) return;
+    nextState = applyTripPlanOptimizationAuditResult(getViewState(page), result);
+    setViewState(page, nextState);
+    syncPage(page, nextState, page.data.plan);
+  } catch (error: unknown) {
+    if (!viewStates.has(page)) return;
+    nextState = applyTripPlanViewError(getViewState(page), getTripPlanUserMessage(error));
+    setViewState(page, nextState);
+    syncPage(page, nextState, page.data.plan);
+  }
 };
 
 const reorderTripPlanItem = (
@@ -1045,6 +1094,9 @@ Page<TripPlanPageData>({
     replacementCandidates: {},
     replacementSelection: {},
     reorderingItem: undefined,
+    audit: undefined,
+    auditDayNumber: undefined,
+    isAuditLoading: false,
   },
 
   onLoad(this: PageInstance<TripPlanPageData>, options: TripPlanRouteOptions): void {
@@ -1118,6 +1170,12 @@ Page<TripPlanPageData>({
     const dayNumber = dayNumberFromEvent(event);
     if (dayNumber === undefined) return;
     confirmTripPlanOptimization(this, dayNumber);
+  },
+
+  onViewOptimizationAudit(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    const dayNumber = dayNumberFromEvent(event);
+    if (dayNumber === undefined) return;
+    void loadTripPlanOptimizationAudit(this, dayNumber);
   },
 
   onReorderItem(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {

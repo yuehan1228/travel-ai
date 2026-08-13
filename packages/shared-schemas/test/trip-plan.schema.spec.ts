@@ -12,6 +12,8 @@ import {
   TripPlanItemReplacementCandidateSchema,
   TripPlanItemReplacementCandidateListSchema,
   ReplaceTripPlanItemInputSchema,
+  GetTripPlanOptimizationAuditInputSchema,
+  TripPlanOptimizationAuditResultSchema,
 } from '../src';
 
 const UUIDS = [
@@ -448,5 +450,133 @@ describe('TripPlan schemas', () => {
         replacementPlaceId: UUIDS[4],
       }).success,
     ).toBe(true);
+  });
+});
+
+describe('TripPlan optimization audit schemas', () => {
+  it('requires measurements for available candidates and protects unavailable facts', () => {
+    const valid = {
+      tripId: UUIDS[0],
+      version: 2,
+      sourceVersion: 1,
+      dayNumber: 1,
+      mode: 'walking' as const,
+      algorithm: 'nearest_neighbor' as const,
+      isOptimal: false as const,
+      orderedItemIds: [UUIDS[1], UUIDS[2]],
+      decisions: [
+        {
+          step: 1,
+          originItemId: UUIDS[1],
+          selectedDestinationItemId: UUIDS[2],
+          reason: 'shortest_duration' as const,
+          candidates: [
+            {
+              destinationItemId: UUIDS[2],
+              status: 'available' as const,
+              durationSeconds: 120,
+              distanceMeters: 500,
+            },
+          ],
+        },
+      ],
+      timelineChanges: [
+        {
+          itemId: UUIDS[1],
+          previousStartTime: '09:00',
+          previousEndTime: '10:00',
+          nextStartTime: '09:00',
+          nextEndTime: '10:00',
+          routeStatus: 'not_applicable' as const,
+        },
+        {
+          itemId: UUIDS[2],
+          previousStartTime: '10:00',
+          previousEndTime: '11:00',
+          nextStartTime: '10:02',
+          nextEndTime: '11:02',
+          routeStatus: 'available' as const,
+          routeDurationSeconds: 120,
+          routeDistanceMeters: 500,
+        },
+      ],
+      warnings: ['Nearest-neighbor is deterministic but not globally optimal.'],
+      generatedAt: '2026-08-11T00:00:00.000Z',
+    };
+    expect(GetTripPlanOptimizationAuditInputSchema.safeParse({ dayNumber: 1 }).success).toBe(true);
+    expect(TripPlanOptimizationAuditResultSchema.safeParse(valid).success).toBe(true);
+    expect(
+      TripPlanOptimizationAuditResultSchema.safeParse({
+        ...valid,
+        decisions: [
+          {
+            ...valid.decisions[0],
+            candidates: [
+              { destinationItemId: UUIDS[2], status: 'unavailable', durationSeconds: 10 },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+
+    const three = {
+      ...valid,
+      orderedItemIds: [UUIDS[1], UUIDS[2], UUIDS[3]],
+      decisions: [
+        {
+          step: 1,
+          originItemId: UUIDS[1],
+          selectedDestinationItemId: UUIDS[2],
+          reason: 'shortest_duration' as const,
+          candidates: [
+            {
+              destinationItemId: UUIDS[2],
+              status: 'available' as const,
+              durationSeconds: 100,
+              distanceMeters: 100,
+            },
+            {
+              destinationItemId: UUIDS[3],
+              status: 'available' as const,
+              durationSeconds: 200,
+              distanceMeters: 200,
+            },
+          ],
+        },
+        {
+          step: 2,
+          originItemId: UUIDS[2],
+          selectedDestinationItemId: UUIDS[3],
+          reason: 'shortest_duration' as const,
+          candidates: [
+            {
+              destinationItemId: UUIDS[3],
+              status: 'available' as const,
+              durationSeconds: 60,
+              distanceMeters: 50,
+            },
+          ],
+        },
+      ],
+      timelineChanges: [
+        valid.timelineChanges[0],
+        valid.timelineChanges[1],
+        {
+          ...valid.timelineChanges[1],
+          itemId: UUIDS[3],
+          previousStartTime: '11:00',
+          previousEndTime: '12:00',
+          nextStartTime: '11:03',
+          nextEndTime: '12:03',
+        },
+      ],
+    };
+    expect(TripPlanOptimizationAuditResultSchema.safeParse(three).success).toBe(true);
+    expect(
+      TripPlanOptimizationAuditResultSchema.safeParse({
+        ...three,
+        decisions: [three.decisions[0], { ...three.decisions[1], originItemId: UUIDS[1] }],
+      }).success,
+    ).toBe(false);
   });
 });
