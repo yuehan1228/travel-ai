@@ -85,7 +85,7 @@ const input: EstimateRouteOrderInput = {
 const createService = (provider = new FakeProvider(), repository = new FakeRepository()) => {
   const routeService = new RouteService(provider, repository, new FakeClock(), environment);
   const matrixService = new RouteMatrixService(routeService, new FakeClock());
-  return { provider, orderService: new RouteOrderService(matrixService) };
+  return { provider, matrixService, orderService: new RouteOrderService(matrixService) };
 };
 
 describe('RouteOrderService', () => {
@@ -169,5 +169,15 @@ describe('RouteOrderService', () => {
     expect(provider.calls).toBe(6);
     await orderService.estimateRouteOrder(input);
     expect(provider.calls).toBe(6);
+  });
+
+  it('calculates from a validated matrix without querying the Provider again', async () => {
+    const { provider, matrixService, orderService } = createService();
+    const matrix = await matrixService.estimateRouteMatrix(input);
+    const callsAfterMatrix = provider.calls;
+    const result = orderService.estimateRouteOrderFromMatrix(matrix, 'a', 'c');
+    expect(result.orderedPointIds[0]).toBe('a');
+    expect(result.orderedPointIds.at(-1)).toBe('c');
+    expect(provider.calls).toBe(callsAfterMatrix);
   });
 });

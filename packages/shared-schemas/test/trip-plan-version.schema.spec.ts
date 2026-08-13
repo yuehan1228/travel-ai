@@ -10,6 +10,8 @@ import {
   TripPlanGenerationResultSchema,
   TripPlanVersionListResultSchema,
   TripPlanVersionSummarySchema,
+  OptimizeTripPlanDayInputSchema,
+  OptimizeTripPlanDayResultSchema,
 } from '../src';
 
 const tripId = '123e4567-e89b-12d3-a456-426614174000';
@@ -189,6 +191,49 @@ describe('TripPlan version contracts', () => {
     };
     expect(EditTripPlanResultSchema.safeParse(result).success).toBe(true);
     expect(EditTripPlanResultSchema.safeParse({ ...result, version: 1 }).success).toBe(false);
+
+    expect(
+      OptimizeTripPlanDayInputSchema.parse({
+        sourceVersion: 1,
+        dayNumber: 1,
+        startItemId: '323e4567-e89b-12d3-a456-426614174000',
+      }),
+    ).toEqual({
+      sourceVersion: 1,
+      dayNumber: 1,
+      startItemId: '323e4567-e89b-12d3-a456-426614174000',
+    });
+    expect(
+      OptimizeTripPlanDayInputSchema.safeParse({ sourceVersion: 0, dayNumber: 1 }).success,
+    ).toBe(false);
+    expect(
+      OptimizeTripPlanDayInputSchema.safeParse({ sourceVersion: 1, dayNumber: 1, extra: true })
+        .success,
+    ).toBe(false);
+    expect(
+      OptimizeTripPlanDayInputSchema.safeParse({
+        sourceVersion: 1,
+        dayNumber: 1,
+        startItemId: '323e4567-e89b-12d3-a456-426614174000',
+        endItemId: '323e4567-e89b-12d3-a456-426614174000',
+      }).success,
+    ).toBe(false);
+    expect(OptimizeTripPlanDayResultSchema.safeParse({ ...result, dayNumber: 1 }).success).toBe(
+      true,
+    );
+    expect(
+      OptimizeTripPlanDayResultSchema.safeParse({ ...result, dayNumber: 1, version: 1 }).success,
+    ).toBe(false);
+    expect(
+      OptimizeTripPlanDayResultSchema.safeParse({
+        ...result,
+        dayNumber: 1,
+        clientOrder: ['x'],
+      }).success,
+    ).toBe(false);
+    expect(OptimizeTripPlanDayResultSchema.safeParse({ ...result, dayNumber: 2 }).success).toBe(
+      false,
+    );
   });
 
   it('accepts only an empty generation input', () => {

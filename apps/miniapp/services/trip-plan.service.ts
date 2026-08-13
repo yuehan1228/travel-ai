@@ -17,6 +17,8 @@ import {
   ReplaceTripPlanItemResultSchema,
   ReorderTripPlanItemsInputSchema,
   ReorderTripPlanItemsResultSchema,
+  OptimizeTripPlanDayInputSchema,
+  OptimizeTripPlanDayResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
   EditTripPlanInput,
@@ -35,6 +37,8 @@ import type {
   ReplaceTripPlanItemResult,
   ReorderTripPlanItemsInput,
   ReorderTripPlanItemsResult,
+  OptimizeTripPlanDayInput,
+  OptimizeTripPlanDayResult,
 } from '@travel-guide/shared-types';
 
 import { AuthService, authService } from './auth.service';
@@ -281,6 +285,36 @@ export class TripPlanService {
       result.dayNumber !== parsedInput.dayNumber
     ) {
       throw new RequestError({ code: 'INVALID_RESPONSE', message: 'Reorder result mismatch' });
+    }
+    return result;
+  }
+
+  public async optimizeTripPlanDay(
+    id: string,
+    version: number,
+    input: OptimizeTripPlanDayInput,
+  ): Promise<OptimizeTripPlanDayResult> {
+    const tripId = TripIdSchema.parse(id);
+    const parsedVersion = parseVersion(version);
+    const parsedInput = OptimizeTripPlanDayInputSchema.parse(input);
+    if (parsedInput.sourceVersion !== parsedVersion) {
+      throw new RequestError({
+        code: 'INVALID_RESPONSE',
+        message: 'Optimization source version does not match the URL version',
+      });
+    }
+    const result = await this.request<OptimizeTripPlanDayResult>({
+      method: 'POST',
+      path: `/trips/${encodeURIComponent(tripId)}/plan/${parsedVersion}/optimize-order`,
+      data: parsedInput,
+      schema: OptimizeTripPlanDayResultSchema,
+    });
+    if (
+      result.tripId !== tripId ||
+      result.sourceVersion !== parsedInput.sourceVersion ||
+      result.dayNumber !== parsedInput.dayNumber
+    ) {
+      throw new RequestError({ code: 'INVALID_RESPONSE', message: 'Optimization result mismatch' });
     }
     return result;
   }

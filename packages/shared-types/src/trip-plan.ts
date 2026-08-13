@@ -255,6 +255,25 @@ export interface ReorderTripPlanItemsResult {
   readonly summary: TripPlanVersionSummary;
 }
 
+/** Strict request for automatically optimizing one day's concrete-place timeline. */
+export interface OptimizeTripPlanDayInput {
+  readonly sourceVersion: number;
+  readonly dayNumber: number;
+  readonly startItemId?: string;
+  readonly endItemId?: string;
+}
+
+/** Complete immutable ready version returned after same-day route optimization. */
+export interface OptimizeTripPlanDayResult {
+  readonly tripId: string;
+  readonly sourceVersion: number;
+  readonly version: number;
+  readonly dayNumber: number;
+  readonly status: 'ready';
+  readonly plan: TripPlan;
+  readonly summary: TripPlanVersionSummary;
+}
+
 /** Public names for the edit whitelist; values are intentionally not user-extensible. */
 export const TRIP_PLAN_EDITABLE_DAY_FIELDS = ['summary', 'warnings'] as const;
 

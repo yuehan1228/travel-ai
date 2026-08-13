@@ -28,6 +28,8 @@ import {
   type ReplaceTripPlanItemResult,
   type ReorderTripPlanItemsInput,
   type ReorderTripPlanItemsResult,
+  type OptimizeTripPlanDayInput,
+  type OptimizeTripPlanDayResult,
   type TripPlanGenerationResult,
   type TripPlanVersionListResult,
   type TripPlanVersionStatus,
@@ -1390,6 +1392,94 @@ export const RestoreTripPlanVersionResultSchema: z.ZodType<
 /** Alias kept for callers that use the TripPlan-prefixed result name. */
 export const TripPlanRestoreVersionResultSchema = RestoreTripPlanVersionResultSchema;
 export const TripPlanRestoreVersionInputSchema = RestoreTripPlanVersionInputSchema;
+
+/** Strict request for deterministic same-day route optimization. */
+export const OptimizeTripPlanDayInputSchema: z.ZodType<
+  OptimizeTripPlanDayInput,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    sourceVersion: positiveSafeIntegerSchema,
+    dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
+    startItemId: z.string().uuid().optional(),
+    endItemId: z.string().uuid().optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.startItemId !== undefined && value.startItemId === value.endItemId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['endItemId'],
+        message: 'startItemId and endItemId must be different',
+      });
+    }
+  });
+
+/** Complete immutable ready result returned by the optimization endpoint. */
+export const OptimizeTripPlanDayResultSchema: z.ZodType<
+  OptimizeTripPlanDayResult,
+  z.ZodTypeDef,
+  unknown
+> = z
+  .object({
+    tripId: z.string().uuid(),
+    sourceVersion: positiveSafeIntegerSchema,
+    version: positiveSafeIntegerSchema,
+    dayNumber: positiveSafeIntegerSchema.max(MAX_TRIP_PLAN_DAYS),
+    status: z.literal('ready'),
+    plan: TripPlanSchema,
+    summary: TripPlanVersionSummarySchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.version <= value.sourceVersion) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['version'],
+        message: 'optimization must create a strictly newer version',
+      });
+    }
+    if (value.summary.version !== value.version) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['summary', 'version'],
+        message: 'summary.version must match version',
+      });
+    }
+    if (value.summary.status !== 'ready') {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['summary', 'status'],
+        message: 'summary.status must be ready',
+      });
+    }
+    if (value.summary.tripId !== value.tripId || value.plan.tripId !== value.tripId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['tripId'],
+        message: 'result trip ids must match',
+      });
+    }
+    if (
+      value.summary.generatedAt === undefined ||
+      value.plan.generatedAt !== value.summary.generatedAt
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['plan', 'generatedAt'],
+        message: 'plan.generatedAt must match summary.generatedAt',
+      });
+    }
+    const targetDay = value.plan.days.find((day) => day.dayNumber === value.dayNumber);
+    if (targetDay === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['dayNumber'],
+        message: 'dayNumber must reference a plan day',
+      });
+    }
+  });
 
 export {
   compareTripPlanVersions,

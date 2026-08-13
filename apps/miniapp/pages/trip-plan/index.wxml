@@ -122,6 +122,41 @@
           >重新生成本日</button>
         </view>
 
+        <view class="day-optimize-card">
+          <text class="block-label">自动优化顺序</text>
+          <text class="muted">可选固定本日真实地点的起点或终点；留空由系统确定性选择。</text>
+          <picker
+            mode="selector"
+            range="{{item.optimizeStartLabels}}"
+            value="{{item.optimizeStartPickerIndex}}"
+            data-day-number="{{item.dayNumber}}"
+            data-endpoint="start"
+            bindchange="onOptimizeEndpointChange"
+            disabled="{{isEditing || isSwitching || optimizingDay !== undefined}}"
+          >
+            <view class="day-regenerate-input">固定起点：{{item.optimizeStartLabels[item.optimizeStartPickerIndex]}}</view>
+          </picker>
+          <picker
+            mode="selector"
+            range="{{item.optimizeEndLabels}}"
+            value="{{item.optimizeEndPickerIndex}}"
+            data-day-number="{{item.dayNumber}}"
+            data-endpoint="end"
+            bindchange="onOptimizeEndpointChange"
+            disabled="{{isEditing || isSwitching || optimizingDay !== undefined}}"
+          >
+            <view class="day-regenerate-input">固定终点：{{item.optimizeEndLabels[item.optimizeEndPickerIndex]}}</view>
+          </picker>
+          <button
+            class="day-regenerate-button"
+            size="mini"
+            data-day-number="{{item.dayNumber}}"
+            bindtap="onOptimizeDay"
+            loading="{{item.isOptimizing}}"
+            disabled="{{isEditing || isSwitching || optimizingDay !== undefined || regeneratingDay !== undefined || replacingItem !== undefined || reorderingItem !== undefined}}"
+          >自动优化顺序</button>
+        </view>
+
         <view wx:if="{{item.hasReorderDraft}}" class="reorder-draft-card">
           <text class="block-label">顺序草稿</text>
           <text class="muted">上移/下移只修改本地草稿，保存前不会创建版本。</text>

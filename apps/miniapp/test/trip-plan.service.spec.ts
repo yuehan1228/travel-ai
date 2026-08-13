@@ -265,6 +265,84 @@ describe('miniapp TripPlanService', () => {
     ]);
   });
 
+  it('optimizes one day through the authenticated endpoint and validates fixed endpoints', async () => {
+    const requests: Array<{ method: string; path: string; data: unknown }> = [];
+    const optimizeResult = {
+      tripId,
+      sourceVersion: 1,
+      version: 2,
+      dayNumber: 1,
+      status: 'ready' as const,
+      plan,
+      summary: { ...summary, id: '723e4567-e89b-12d3-a456-426614174000', version: 2 },
+    };
+    const service = new TripPlanService(
+      createClient(async (options) => {
+        requests.push({ method: options.method, path: options.url, data: options.data });
+        return {
+          statusCode: 200,
+          data: { success: true, data: optimizeResult, requestId: 'optimize-1' },
+        };
+      }),
+      createAuth('plan-token'),
+    );
+    await expect(
+      service.optimizeTripPlanDay(tripId, 1, {
+        sourceVersion: 1,
+        dayNumber: 1,
+        startItemId: '223e4567-e89b-12d3-a456-426614174000',
+        endItemId: '323e4567-e89b-12d3-a456-426614174000',
+      }),
+    ).resolves.toEqual(optimizeResult);
+    expect(requests).toEqual([
+      {
+        method: 'POST',
+        path: `https://api.example.invalid/trips/${tripId}/plan/1/optimize-order`,
+        data: {
+          sourceVersion: 1,
+          dayNumber: 1,
+          startItemId: '223e4567-e89b-12d3-a456-426614174000',
+          endItemId: '323e4567-e89b-12d3-a456-426614174000',
+        },
+      },
+    ]);
+    await expect(
+      service.optimizeTripPlanDay(tripId, 2, { sourceVersion: 1, dayNumber: 1 }),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+  });
+
+  it('does not request optimization without a token and clears expired auth state', async () => {
+    let requests = 0;
+    const missingToken = new TripPlanService(
+      createClient(async () => {
+        requests += 1;
+        throw new Error('network should not be called');
+      }),
+      createAuth(undefined),
+    );
+    await expect(
+      missingToken.optimizeTripPlanDay(tripId, 1, { sourceVersion: 1, dayNumber: 1 }),
+    ).rejects.toMatchObject({ code: 'AUTH_TOKEN_INVALID' });
+    expect(requests).toBe(0);
+
+    const auth = createAuth('expired-token');
+    const expired = new TripPlanService(
+      createClient(async () => ({
+        statusCode: 401,
+        data: {
+          success: false,
+          error: { code: 'AUTH_TOKEN_INVALID', message: 'expired' },
+          requestId: 'optimize-auth-invalid',
+        },
+      })),
+      auth,
+    );
+    await expect(
+      expired.optimizeTripPlanDay(tripId, 1, { sourceVersion: 1, dayNumber: 1 }),
+    ).rejects.toMatchObject({ apiCode: 'AUTH_TOKEN_INVALID' });
+    expect(auth.loggedOut).toBe(true);
+  });
+
   it('uses strict shared schemas, Bearer auth and the three plan endpoints', async () => {
     const requests: Array<{ method: string; path: string; authorization: string; data: unknown }> =
       [];

@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 
 import {
   CreateTripInputSchema,
@@ -13,6 +13,8 @@ import {
   ReplaceTripPlanItemResultSchema,
   ReorderTripPlanItemsInputSchema,
   ReorderTripPlanItemsResultSchema,
+  OptimizeTripPlanDayInputSchema,
+  OptimizeTripPlanDayResultSchema,
   RegenerateTripPlanDayInputSchema,
   RegenerateTripPlanDayResultSchema,
   RestoreTripPlanVersionInputSchema,
@@ -22,6 +24,8 @@ import {
   TripIdSchema,
   TripPlanGenerationResultSchema,
   TripPlanSchema,
+  RouteMatrixResultSchema,
+  RouteOrderResultSchema,
   TripPlanVersionListResultSchema,
   WeatherResultSchema,
   MAX_TRIP_PLAN_VERSIONS,
@@ -33,6 +37,7 @@ import type {
   EditTripPlanResult,
   EstimateRouteInput,
   EstimateRouteOrderInput,
+  EstimateRouteMatrixInput,
   GetWeatherInput,
   GenerateTripPlanInput,
   RegenerateTripPlanDayInput,
@@ -49,6 +54,7 @@ import type {
   TripPlanVersionListResult,
   RouteEstimate,
   RouteOrderResult,
+  RouteMatrixResult,
   WeatherResult,
   TripPlanItemReplacementCandidateList,
   ListTripPlanItemReplacementCandidatesInput,
@@ -56,12 +62,15 @@ import type {
   ReplaceTripPlanItemResult,
   ReorderTripPlanItemsInput,
   ReorderTripPlanItemsResult,
+  OptimizeTripPlanDayInput,
+  OptimizeTripPlanDayResult,
   Place,
   TripPlanItem,
 } from '@travel-guide/shared-types';
 
 import { PlaceService } from '../places/place.service';
 import { RouteOrderService } from '../routes/route-order.service';
+import { RouteMatrixService } from '../routes/route-matrix.service';
 import { RouteService } from '../routes/route.service';
 import { WeatherService } from '../weather/weather.service';
 import { TRIP_REPOSITORY } from '../trips/trip.tokens';
@@ -74,6 +83,7 @@ import type { TripPlanDayRegenerationContext } from './trip-plan-day-regeneratio
 import { TripPlanGenerationService } from './trip-plan-generation.service';
 import { applyTripPlanEdits, TripPlanEditError } from './trip-plan-edit';
 import { reorderTripPlanDayItems, TripPlanReorderError } from './trip-plan-reorder';
+import { optimizeTripPlanDayItems, TripPlanOptimizeError } from './trip-plan-optimize';
 import {
   compareTripPlanVersions,
   TripPlanDiffValidationError,
@@ -110,6 +120,15 @@ export interface TripPlanRouteReader {
 
 export interface TripPlanRouteOrderReader {
   estimateRouteOrder(input: EstimateRouteOrderInput): Promise<RouteOrderResult>;
+  estimateRouteOrderFromMatrix?(
+    matrix: RouteMatrixResult,
+    startId?: string,
+    endId?: string,
+  ): RouteOrderResult;
+}
+
+export interface TripPlanRouteMatrixReader {
+  estimateRouteMatrix(input: EstimateRouteMatrixInput): Promise<RouteMatrixResult>;
 }
 
 const validationError = (): TripPlanException =>
@@ -169,6 +188,13 @@ const reorderUnavailableError = (): TripPlanException =>
     'A real route for the reordered timeline is unavailable',
   );
 
+const optimizeUnavailableError = (): TripPlanException =>
+  new TripPlanException(
+    'TRIP_PLAN_OPTIMIZE_UNAVAILABLE',
+    422,
+    'A complete real route order is unavailable for the requested day',
+  );
+
 const MAX_REPLACEMENT_CANDIDATE_PAGES = 50;
 
 const asCode = (error: unknown): string | undefined =>
@@ -191,6 +217,33 @@ const mapReorderError = (error: unknown): TripPlanException => {
     if (error.code === 'TRIP_PLAN_ENTITY_MISMATCH') return entityMismatchError();
     if (error.code === 'TRIP_PLAN_REORDER_UNAVAILABLE') return reorderUnavailableError();
     return validationError();
+  }
+  return persistenceError();
+};
+
+const mapOptimizeError = (error: unknown): TripPlanException => {
+  if (error instanceof TripPlanException) return error;
+  if (error instanceof TripPlanOptimizeError) {
+    if (error.code === 'TRIP_PLAN_ENTITY_MISMATCH') return entityMismatchError();
+    return validationError();
+  }
+  const code = asCode(error);
+  if (code === 'ROUTE_ORDER_VALIDATION_ERROR' || code === 'ROUTE_MATRIX_VALIDATION_ERROR') {
+    return validationError();
+  }
+  if (
+    code === 'ROUTE_ORDER_UNAVAILABLE' ||
+    code === 'ROUTE_MATRIX_UNAVAILABLE' ||
+    code === 'ROUTE_UNAVAILABLE'
+  ) {
+    return optimizeUnavailableError();
+  }
+  if (
+    code === 'ROUTE_ORDER_PROVIDER_ERROR' ||
+    code === 'ROUTE_MATRIX_PROVIDER_ERROR' ||
+    code === 'ROUTE_PROVIDER_ERROR'
+  ) {
+    return providerError();
   }
   return persistenceError();
 };
@@ -398,6 +451,131 @@ const reorderTimelineWithRoutes = (
   return validated.data;
 };
 
+const optimizeTimelineWithRoutes = (
+  plan: TripPlan,
+  dayNumber: number,
+  order: RouteOrderResult,
+  generatedAt: string,
+): TripPlan => {
+  const dayIndex = plan.days.findIndex((day) => day.dayNumber === dayNumber);
+  if (dayIndex < 0) throw entityMismatchError();
+  const sourceDay = plan.days[dayIndex]!;
+  if (sourceDay.items.length === 0) throw validationError();
+  const earliestStart = Math.min(...sourceDay.items.map((item) => timeToMinutes(item.startTime)));
+  if (!Number.isFinite(earliestStart)) throw validationError();
+  const routeMap = new Map(
+    order.legs.map((leg) => [`${leg.originId}\u0000${leg.destinationId}`, leg.estimate]),
+  );
+  let cursor = earliestStart;
+  let previousPlaceItem: TripPlan['days'][number]['items'][number] | undefined;
+  const items = sourceDay.items.map((item) => {
+    const duration = timeToMinutes(item.endTime) - timeToMinutes(item.startTime);
+    if (duration <= 0) throw validationError();
+    const route =
+      item.place !== undefined && previousPlaceItem !== undefined
+        ? routeMap.get(`${previousPlaceItem.id}\u0000${item.id}`)
+        : undefined;
+    if (item.place !== undefined && previousPlaceItem !== undefined && route === undefined) {
+      throw optimizeUnavailableError();
+    }
+    const travelMinutes =
+      route === undefined || route.dataSource === 'unavailable'
+        ? 0
+        : Math.ceil(route.durationSeconds / 60);
+    const start = cursor + travelMinutes;
+    const end = start + duration;
+    if (start < 0 || end > 24 * 60 || end <= start) throw validationError();
+    cursor = end;
+    if (item.place !== undefined) previousPlaceItem = item;
+    const dataSources =
+      item.place === undefined
+        ? [...item.dataSources]
+        : route
+          ? item.dataSources.includes('route_provider')
+            ? [...item.dataSources]
+            : [...item.dataSources, 'route_provider' as const]
+          : item.dataSources.filter((source) => source !== 'route_provider');
+    return {
+      ...item,
+      startTime: minutesToTime(start),
+      endTime: minutesToTime(end),
+      ...(route === undefined ? { route: undefined } : { route }),
+      dataSources,
+    };
+  });
+  const nextPlan = {
+    ...plan,
+    generatedAt,
+    days: plan.days.map((day, index) => (index === dayIndex ? { ...day, items } : day)),
+  };
+  const validated = TripPlanSchema.safeParse(nextPlan);
+  if (!validated.success) throw validationError();
+  return validated.data;
+};
+
+const validateOrderAgainstMatrix = (
+  matrix: RouteMatrixResult,
+  order: RouteOrderResult,
+  startId?: string,
+  endId?: string,
+): boolean => {
+  const pointIds = matrix.points.map((point) => point.id);
+  const ordered = order.orderedPointIds;
+  if (
+    order.generatedAt !== matrix.generatedAt ||
+    ordered.length !== pointIds.length ||
+    new Set(ordered).size !== ordered.length ||
+    pointIds.some((id) => !ordered.includes(id)) ||
+    (startId !== undefined && ordered[0] !== startId) ||
+    (endId !== undefined && ordered[ordered.length - 1] !== endId)
+  ) {
+    return false;
+  }
+  const cells = new Map(
+    matrix.cells.map((cell) => [`${cell.originId}\u0000${cell.destinationId}`, cell]),
+  );
+  if (order.legs.length !== ordered.length - 1) return false;
+  return order.legs.every((leg, index) => {
+    if (leg.originId !== ordered[index] || leg.destinationId !== ordered[index + 1]) return false;
+    const cell = cells.get(`${leg.originId}\u0000${leg.destinationId}`);
+    if (cell?.status !== 'available' || cell.estimate === undefined) return false;
+    return (
+      cell.estimate.dataSource !== 'unavailable' &&
+      cell.estimate.dataSource === leg.estimate.dataSource &&
+      cell.estimate.provider === leg.estimate.provider &&
+      cell.estimate.fetchedAt === leg.estimate.fetchedAt &&
+      cell.estimate.mode === leg.estimate.mode &&
+      cell.estimate.distanceMeters === leg.estimate.distanceMeters &&
+      cell.estimate.durationSeconds === leg.estimate.durationSeconds &&
+      cell.estimate.tollsCny === leg.estimate.tollsCny &&
+      cell.estimate.origin.location.longitude === leg.estimate.origin.location.longitude &&
+      cell.estimate.origin.location.latitude === leg.estimate.origin.location.latitude &&
+      cell.estimate.destination.location.longitude ===
+        leg.estimate.destination.location.longitude &&
+      cell.estimate.destination.location.latitude === leg.estimate.destination.location.latitude
+    );
+  });
+};
+
+const validateMatrixAgainstPoints = (
+  matrix: RouteMatrixResult,
+  points: EstimateRouteMatrixInput['points'],
+  mode: EstimateRouteMatrixInput['mode'],
+): boolean => {
+  if (matrix.mode !== mode || matrix.points.length !== points.length) return false;
+  const requested = new Map(points.map((point) => [point.id, point]));
+  return matrix.points.every((point) => {
+    const expected = requested.get(point.id);
+    if (expected === undefined) return false;
+    const sameLocation =
+      point.endpoint.location.longitude.toFixed(6) ===
+        expected.endpoint.location.longitude.toFixed(6) &&
+      point.endpoint.location.latitude.toFixed(6) ===
+        expected.endpoint.location.latitude.toFixed(6);
+    return sameLocation && point.endpoint.placeId === expected.endpoint.placeId;
+  });
+};
+
 const mapContextError = (error: unknown): TripPlanException => {
   if (error instanceof TripPlanException) return error;
   const code = asCode(error);
@@ -438,6 +616,9 @@ export class TripPlanService {
     @Inject(RouteService) private readonly routeService: TripPlanRouteReader,
     @Inject(RouteOrderService) private readonly routeOrderService: TripPlanRouteOrderReader,
     @Inject(TRIP_PLAN_CLOCK) private readonly clock: TripPlanClock = systemTripPlanClock,
+    @Optional()
+    @Inject(RouteMatrixService)
+    private readonly routeMatrixService?: TripPlanRouteMatrixReader,
   ) {}
 
   public async generate(
@@ -1193,6 +1374,187 @@ export class TripPlanService {
     }
   }
 
+  /** Optimize one day's concrete-place order using a real matrix and nearest-neighbor result. */
+  public async optimizeTripPlanDay(
+    userId: string,
+    tripId: string,
+    version: number,
+    input: OptimizeTripPlanDayInput,
+  ): Promise<OptimizeTripPlanDayResult> {
+    this.assertTripId(tripId);
+    const parsedInput = OptimizeTripPlanDayInputSchema.safeParse(input);
+    if (!parsedInput.success || parsedInput.data.sourceVersion !== version) {
+      throw validationError();
+    }
+    const now = this.clock.now();
+    if (Number.isNaN(now.getTime())) throw validationError();
+
+    const trip = await this.requireTripForVersionOperation(userId, tripId);
+    if (trip.status === 'generating') throw inProgressError();
+
+    let sourceRecord: TripPlanVersionRecord | undefined;
+    try {
+      sourceRecord = await this.repository.findVersionForUser(userId, tripId, version);
+    } catch {
+      throw persistenceError();
+    }
+    if (
+      sourceRecord === undefined ||
+      sourceRecord.status !== 'ready' ||
+      sourceRecord.plan === undefined
+    ) {
+      throw planNotFoundError();
+    }
+    const sourcePlan = TripPlanSchema.safeParse(sourceRecord.plan);
+    if (!sourcePlan.success) throw persistenceError();
+    if (sourcePlan.data.tripId !== tripId) throw entityMismatchError();
+    const targetDay = sourcePlan.data.days.find(
+      (day) => day.dayNumber === parsedInput.data.dayNumber,
+    );
+    if (targetDay === undefined) throw dayNotFoundError();
+
+    const realItems = targetDay.items.filter((item) => item.place !== undefined);
+    const realItemIds = realItems.map((item) => item.id);
+    const realItemIdSet = new Set(realItemIds);
+    if (
+      (parsedInput.data.startItemId !== undefined &&
+        !realItemIdSet.has(parsedInput.data.startItemId)) ||
+      (parsedInput.data.endItemId !== undefined && !realItemIdSet.has(parsedInput.data.endItemId))
+    ) {
+      throw entityMismatchError();
+    }
+    if (realItems.length < 2) throw validationError();
+    // RouteMatrixService deliberately caps one matrix at ten points; fail closed
+    // instead of silently optimizing only a subset of the requested day.
+    if (realItems.length > 10) throw optimizeUnavailableError();
+
+    let reserved: TripPlanEditReservationResult;
+    try {
+      if (this.repository.reserveOptimizeOrder !== undefined) {
+        reserved = await this.repository.reserveOptimizeOrder(
+          userId,
+          tripId,
+          version,
+          parsedInput.data.dayNumber,
+          now,
+        );
+      } else {
+        const fallback = await this.repository.reserveGeneration(userId, tripId, now);
+        reserved =
+          fallback.status === 'reserved'
+            ? {
+                status: 'reserved',
+                reservation: {
+                  ...fallback.reservation,
+                  operation: 'optimize-order' as const,
+                  sourceVersion: version,
+                  dayNumber: parsedInput.data.dayNumber,
+                  previousTripStatus: fallback.reservation.previousTripStatus ?? trip.status,
+                },
+              }
+            : fallback;
+      }
+    } catch {
+      throw persistenceError();
+    }
+    if (reserved.status === 'not_found') throw tripNotFoundError();
+    if (reserved.status === 'in_progress') throw inProgressError();
+    if (reserved.status === 'source_not_ready') throw planNotFoundError();
+    const reservation: TripPlanGenerationReservation = {
+      ...reserved.reservation,
+      operation: 'optimize-order',
+      sourceVersion: version,
+      dayNumber: parsedInput.data.dayNumber,
+      previousTripStatus: reserved.reservation.previousTripStatus ?? trip.status,
+    };
+
+    try {
+      const mode = trip.inputSnapshot.transportPreference === 'driving' ? 'driving' : 'walking';
+      const points = realItems.map((item) => ({
+        id: item.id,
+        endpoint: { location: item.place!.location, placeId: item.place!.id },
+      }));
+      if (this.routeMatrixService === undefined) throw optimizeUnavailableError();
+      const matrixResult = await this.routeMatrixService.estimateRouteMatrix({ points, mode });
+      const parsedMatrix = RouteMatrixResultSchema.safeParse(matrixResult);
+      if (!parsedMatrix.success) throw providerError();
+      const matrix = parsedMatrix.data;
+      if (!validateMatrixAgainstPoints(matrix, points, mode)) throw providerError();
+      if (this.routeOrderService.estimateRouteOrderFromMatrix === undefined) {
+        throw optimizeUnavailableError();
+      }
+      const rawOrder = this.routeOrderService.estimateRouteOrderFromMatrix(
+        matrix,
+        parsedInput.data.startItemId,
+        parsedInput.data.endItemId,
+      );
+      const parsedOrder = RouteOrderResultSchema.safeParse(rawOrder);
+      if (!parsedOrder.success || parsedOrder.data.mode !== mode) throw providerError();
+      if (
+        !validateOrderAgainstMatrix(
+          matrix,
+          parsedOrder.data,
+          parsedInput.data.startItemId,
+          parsedInput.data.endItemId,
+        )
+      ) {
+        throw optimizeUnavailableError();
+      }
+      const orderedRealIds = parsedOrder.data.orderedPointIds;
+      if (
+        orderedRealIds.length !== realItemIds.length ||
+        new Set(orderedRealIds).size !== orderedRealIds.length ||
+        realItemIds.some((itemId) => !orderedRealIds.includes(itemId))
+      ) {
+        throw optimizeUnavailableError();
+      }
+
+      let realIndex = 0;
+      const orderedItemIds = targetDay.items.map((item) =>
+        item.place === undefined ? item.id : orderedRealIds[realIndex++]!,
+      );
+      const orderedPlan = optimizeTripPlanDayItems(
+        sourcePlan.data,
+        orderedItemIds,
+        parsedInput.data.dayNumber,
+      );
+      const optimizedPlan = optimizeTimelineWithRoutes(
+        orderedPlan,
+        parsedInput.data.dayNumber,
+        parsedOrder.data,
+        now.toISOString(),
+      );
+      let saved: TripPlanVersionRecord;
+      try {
+        saved = await this.repository.saveReady(userId, tripId, reservation, optimizedPlan, now);
+      } catch {
+        throw persistenceError();
+      }
+      const result: OptimizeTripPlanDayResult = {
+        tripId,
+        sourceVersion: version,
+        version: saved.version,
+        dayNumber: parsedInput.data.dayNumber,
+        status: 'ready',
+        plan: optimizedPlan,
+        summary: tripPlanVersionSummary(saved),
+      };
+      const validated = OptimizeTripPlanDayResultSchema.safeParse(result);
+      if (!validated.success) throw persistenceError();
+      return validated.data;
+    } catch (error: unknown) {
+      const mapped = mapOptimizeError(error);
+      try {
+        const failedAt = this.clock.now();
+        if (Number.isNaN(failedAt.getTime())) throw persistenceError();
+        await this.repository.markFailed(userId, tripId, reservation, failedAt);
+      } catch {
+        throw persistenceError();
+      }
+      throw mapped;
+    }
+  }
+
   /** Apply a controlled edit to a ready snapshot without invoking any Provider. */
   public edit(
     userId: string,
@@ -1593,6 +1955,15 @@ export class TripPlanService {
     input: ReorderTripPlanItemsInput,
   ): Promise<ReorderTripPlanItemsResult> {
     return this.reorderTripPlanItems(userId, tripId, version, input);
+  }
+
+  public optimizeTripPlanDayVersion(
+    userId: string,
+    tripId: string,
+    version: number,
+    input: OptimizeTripPlanDayInput,
+  ): Promise<OptimizeTripPlanDayResult> {
+    return this.optimizeTripPlanDay(userId, tripId, version, input);
   }
 
   public editTripPlanVersion(

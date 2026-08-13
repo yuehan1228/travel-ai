@@ -14,6 +14,7 @@ import {
   TripPlanSchema,
   TripPlanVersionListResultSchema,
   ReorderTripPlanItemsResultSchema,
+  OptimizeTripPlanDayResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
   CreateTripInput,
@@ -123,27 +124,29 @@ const validPlan = (): TripPlan =>
           ? [
               {
                 id: reorderFirstItemId,
-                type: 'rest',
+                type: 'attraction',
                 startTime: '09:00',
                 endTime: '10:00',
-                name: '休息一',
+                name: placeFor(1).name,
                 description: '第一段休息',
                 recommendationReason: '节奏舒缓',
+                place: placeFor(1),
                 estimatedCostCny: 1,
                 tips: [],
-                dataSources: ['ai_generated'],
+                dataSources: ['map_provider'],
               },
               {
                 id: reorderSecondItemId,
-                type: 'rest',
+                type: 'attraction',
                 startTime: '10:30',
                 endTime: '11:30',
-                name: '休息二',
+                name: placeFor(2).name,
                 description: '第二段休息',
                 recommendationReason: '节奏舒缓',
+                place: placeFor(2),
                 estimatedCostCny: 2,
                 tips: [],
-                dataSources: ['ai_generated'],
+                dataSources: ['map_provider'],
               },
             ]
           : [],
@@ -158,8 +161,8 @@ const validPlan = (): TripPlan =>
       accommodationCny: 0,
       transportationCny: 0,
       foodCny: 0,
-      attractionsCny: 0,
-      otherCny: 3,
+      attractionsCny: 3,
+      otherCny: 0,
     },
     transportationTips: [],
     generalTips: [],
@@ -489,6 +492,51 @@ describe('TripPlan API boundary', () => {
     );
   });
 
+  it('protects optimize-order with authentication, strict URL/body versions, and request-id parity', async () => {
+    const unauthenticated = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: `/trips/${validTripId}/plan/1/optimize-order`,
+        headers: { 'x-request-id': 'trip-plan-optimize-auth-1' },
+        payload: { sourceVersion: 1, dayNumber: 1 },
+      });
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(unauthenticated.headers['x-request-id']).toBe('trip-plan-optimize-auth-1');
+    expect(ApiFailureSchema.parse(JSON.parse(unauthenticated.payload)).error.code).toBe(
+      'AUTH_TOKEN_INVALID',
+    );
+
+    const token = await login();
+    const mismatch = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: `/trips/${validTripId}/plan/1/optimize-order`,
+        headers: { authorization: `Bearer ${token}`, 'x-request-id': 'trip-plan-optimize-400-1' },
+        payload: { sourceVersion: 2, dayNumber: 1 },
+      });
+    expect(mismatch.statusCode).toBe(400);
+    expect(mismatch.headers['x-request-id']).toBe('trip-plan-optimize-400-1');
+    expect(ApiFailureSchema.parse(JSON.parse(mismatch.payload)).error.code).toBe(
+      'TRIP_PLAN_VALIDATION_ERROR',
+    );
+
+    const invalidVersion = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: `/trips/${validTripId}/plan/not-a-version/optimize-order`,
+        headers: { authorization: `Bearer ${token}`, 'x-request-id': 'trip-plan-optimize-400-2' },
+        payload: { sourceVersion: 1, dayNumber: 1 },
+      });
+    expect(invalidVersion.statusCode).toBe(400);
+    expect(invalidVersion.headers['x-request-id']).toBe('trip-plan-optimize-400-2');
+  });
+
   it('validates strict body/id and does not reveal a missing trip or plan', async () => {
     const token = await login();
     const invalidBody = await app
@@ -757,6 +805,42 @@ describe('TripPlan API boundary', () => {
       sourceVersion: 3,
       dayNumber: 1,
       version: 4,
+      status: 'ready',
+    });
+    expect(envelope.data.plan.days[0]?.items.map((item) => item.id)).toEqual([
+      reorderSecondItemId,
+      reorderFirstItemId,
+    ]);
+  });
+
+  it('optimizes a ready day with real fake matrix/order and keeps request-id parity', async () => {
+    const token = await login();
+    const requestId = 'trip-plan-optimize-success-1';
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: `/trips/${validTripId}/plan/3/optimize-order`,
+        headers: { authorization: `Bearer ${token}`, 'x-request-id': requestId },
+        payload: {
+          sourceVersion: 3,
+          dayNumber: 1,
+          startItemId: reorderSecondItemId,
+          endItemId: reorderFirstItemId,
+        },
+      });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['x-request-id']).toBe(requestId);
+    const envelope = createApiSuccessSchema(OptimizeTripPlanDayResultSchema).parse(
+      JSON.parse(response.payload),
+    );
+    expect(envelope.requestId).toBe(requestId);
+    expect(envelope.data).toMatchObject({
+      tripId: validTripId,
+      sourceVersion: 3,
+      version: 5,
+      dayNumber: 1,
       status: 'ready',
     });
     expect(envelope.data.plan.days[0]?.items.map((item) => item.id)).toEqual([

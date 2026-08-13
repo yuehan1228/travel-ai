@@ -6,6 +6,7 @@ import type {
   TripPlanItemReplacementCandidateList,
   ReplaceTripPlanItemInput,
   ReorderTripPlanItemsInput,
+  OptimizeTripPlanDayInput,
 } from '@travel-guide/shared-types';
 import { EditTripPlanInputSchema } from '@travel-guide/shared-schemas';
 
@@ -21,6 +22,7 @@ import {
   applyTripPlanViewError,
   applyTripPlanItemReorderDraft,
   applyTripPlanVersionResult,
+  applyTripPlanOptimizationResult,
   beginTripPlanLoad,
   beginTripPlanDayRegeneration,
   beginTripPlanItemReplacement,
@@ -29,12 +31,15 @@ import {
   beginTripPlanDiff,
   beginTripPlanVersionSwitch,
   beginTripPlanVersionRestore,
+  beginTripPlanOptimization,
   createTripPlanDisplayModel,
   createTripPlanViewState,
   createTripPlanViewStateRegistry,
   getTripPlanUserMessage,
+  getTripPlanOptimizationEndpointOptions,
   hasTripPlanReorderDraft,
   isTripPlanReorderConfirmationAccepted,
+  isTripPlanOptimizationConfirmationAccepted,
   moveTripPlanItemInOrder,
   parseTripPlanRouteParams,
   restoreTripPlanItemReorderDraft,
@@ -80,6 +85,9 @@ interface TripPlanPageData {
   diffVersionLabels: string[];
   isDiffLoading: boolean;
   restoringVersion?: number;
+  optimizingDay?: number;
+  optimizeStartItemIds: Record<string, string>;
+  optimizeEndItemIds: Record<string, string>;
   isEditing: boolean;
   editSummary: string;
   editDayDrafts: Record<string, { summary: string }>;
@@ -105,6 +113,11 @@ type TripPlanPageDisplayModel = Omit<TripPlanDisplayModel, 'days'> & {
       regenerateInstruction: string;
       isRegenerating: boolean;
       isReordering: boolean;
+      isOptimizing: boolean;
+      optimizeStartLabels: string[];
+      optimizeEndLabels: string[];
+      optimizeStartPickerIndex: number;
+      optimizeEndPickerIndex: number;
       hasReorderDraft: boolean;
       editSummary: string;
       items: Array<
@@ -152,6 +165,15 @@ const selectedVersionIndex = (versions: readonly VersionOption[], version?: numb
   return index < 0 ? 0 : index;
 };
 
+const optimizeEndpointPickerIndex = (
+  options: readonly { id: string; label: string }[],
+  selectedId: string | undefined,
+): number => {
+  if (selectedId === undefined) return 0;
+  const index = options.findIndex((option) => option.id === selectedId);
+  return index < 0 ? 0 : index;
+};
+
 const syncPage = (
   page: PageInstance<TripPlanPageData>,
   state: TripPlanViewState,
@@ -166,8 +188,25 @@ const syncPage = (
           ...plan,
           days: plan.days.map((day) => ({
             ...day,
+            ...(() => {
+              const options = getTripPlanOptimizationEndpointOptions(day);
+              const key = String(day.dayNumber);
+              return {
+                optimizeStartLabels: options.map((option) => option.label),
+                optimizeEndLabels: options.map((option) => option.label),
+                optimizeStartPickerIndex: optimizeEndpointPickerIndex(
+                  options,
+                  page.data.optimizeStartItemIds[key],
+                ),
+                optimizeEndPickerIndex: optimizeEndpointPickerIndex(
+                  options,
+                  page.data.optimizeEndItemIds[key],
+                ),
+              };
+            })(),
             regenerateInstruction: page.data.regenerateInstructions[String(day.dayNumber)] ?? '',
             isRegenerating: state.regeneratingDay === day.dayNumber,
+            isOptimizing: state.optimizingDay === day.dayNumber,
             isReordering: state.reorderingItem === `${day.dayNumber}:save`,
             hasReorderDraft: hasTripPlanReorderDraft(state, day.dayNumber),
             editSummary: page.data.editDayDrafts[String(day.dayNumber)]?.summary ?? day.summary,
@@ -207,6 +246,7 @@ const syncPage = (
     versionPickerIndex: selectedVersionIndex(readyVersions, state.selectedVersion),
     selectedVersion: state.selectedVersion,
     regeneratingDay: state.regeneratingDay,
+    optimizingDay: state.optimizingDay,
     replacingItem: state.replacingItem,
     reorderingItem: state.reorderingItem,
     diff: state.diff,
@@ -224,6 +264,8 @@ const syncPage = (
     replacementCandidates: page.data.replacementCandidates,
     replacementLoadingItem: page.data.replacementLoadingItem,
     replacementSelection: page.data.replacementSelection,
+    optimizeStartItemIds: page.data.optimizeStartItemIds,
+    optimizeEndItemIds: page.data.optimizeEndItemIds,
   });
 };
 
@@ -323,6 +365,27 @@ const updateDayInstruction = (
   });
 };
 
+const updateOptimizeEndpointPicker = (
+  page: PageInstance<TripPlanPageData>,
+  event: TripPlanPageEvent,
+  endpoint: 'start' | 'end',
+): void => {
+  const dayNumber = dayNumberFromEvent(event);
+  const value = pickerIndexFromEvent(event);
+  if (dayNumber === undefined || value === undefined) return;
+  const day = page.data.plan?.days.find((item) => item.dayNumber === dayNumber);
+  if (day === undefined) return;
+  const ids = ['', ...day.items.filter((item) => item.place !== undefined).map((item) => item.id)];
+  const selectedId = ids[value];
+  if (selectedId === undefined) return;
+  const key = String(dayNumber);
+  page.setData(
+    endpoint === 'start'
+      ? { optimizeStartItemIds: { ...page.data.optimizeStartItemIds, [key]: selectedId } }
+      : { optimizeEndItemIds: { ...page.data.optimizeEndItemIds, [key]: selectedId } },
+  );
+};
+
 const regenerateDay = async (
   page: PageInstance<TripPlanPageData>,
   dayNumber: number,
@@ -361,6 +424,75 @@ const regenerateDay = async (
     // A failed replacement keeps the old immutable plan visible for retry.
     syncPage(page, nextState, oldPlan);
   }
+};
+
+const optimizeTripPlanDay = async (
+  page: PageInstance<TripPlanPageData>,
+  dayNumber: number,
+): Promise<void> => {
+  const state = getViewState(page);
+  if (
+    page.data.isSwitching ||
+    state.optimizingDay !== undefined ||
+    state.regeneratingDay !== undefined ||
+    state.replacingItem !== undefined ||
+    state.reorderingItem !== undefined ||
+    state.selectedVersion === undefined ||
+    page.data.tripId.length === 0
+  ) {
+    return;
+  }
+  const startItemId = page.data.optimizeStartItemIds[String(dayNumber)]?.trim();
+  const endItemId = page.data.optimizeEndItemIds[String(dayNumber)]?.trim();
+  const request: OptimizeTripPlanDayInput = {
+    sourceVersion: state.selectedVersion,
+    dayNumber,
+    ...(startItemId === undefined || startItemId.length === 0 ? {} : { startItemId }),
+    ...(endItemId === undefined || endItemId.length === 0 ? {} : { endItemId }),
+  };
+  const oldPlan = page.data.plan;
+  let nextState = beginTripPlanOptimization(state, dayNumber);
+  if (nextState === state) return;
+  setViewState(page, nextState);
+  syncPage(page, nextState, oldPlan);
+  try {
+    const result = await tripPlanService.optimizeTripPlanDay(
+      page.data.tripId,
+      request.sourceVersion,
+      request,
+    );
+    if (!viewStates.has(page)) return;
+    nextState = applyTripPlanOptimizationResult(getViewState(page), result);
+    setViewState(page, nextState);
+    syncPage(page, nextState, displayPlan(nextState));
+  } catch (error: unknown) {
+    if (!viewStates.has(page)) return;
+    nextState = applyTripPlanViewError(getViewState(page), getTripPlanUserMessage(error));
+    setViewState(page, nextState);
+    syncPage(page, nextState, oldPlan);
+  }
+};
+
+const confirmTripPlanOptimization = (
+  page: PageInstance<TripPlanPageData>,
+  dayNumber: number,
+): void => {
+  const run = (): void => {
+    void optimizeTripPlanDay(page, dayNumber);
+  };
+  if (typeof wx.showModal !== 'function') {
+    run();
+    return;
+  }
+  wx.showModal({
+    title: '确认自动优化',
+    content: '将根据真实路线重新安排本日顺序并保存为新版本？',
+    confirmText: '确认优化',
+    cancelText: '取消',
+    success: (result) => {
+      if (isTripPlanOptimizationConfirmationAccepted(result)) run();
+    },
+  });
 };
 
 const reorderTripPlanItem = (
@@ -904,6 +1036,8 @@ Page<TripPlanPageData>({
     diffToPickerIndex: 0,
     diffVersionLabels: [],
     isDiffLoading: false,
+    optimizeStartItemIds: {},
+    optimizeEndItemIds: {},
     isEditing: false,
     editSummary: '',
     editDayDrafts: {},
@@ -972,6 +1106,18 @@ Page<TripPlanPageData>({
     const dayNumber = dayNumberFromEvent(event);
     if (dayNumber === undefined) return;
     void regenerateDay(this, dayNumber);
+  },
+
+  onOptimizeEndpointChange(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    const endpoint = event.currentTarget?.dataset?.endpoint;
+    if (endpoint !== 'start' && endpoint !== 'end') return;
+    updateOptimizeEndpointPicker(this, event, endpoint);
+  },
+
+  onOptimizeDay(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {
+    const dayNumber = dayNumberFromEvent(event);
+    if (dayNumber === undefined) return;
+    confirmTripPlanOptimization(this, dayNumber);
   },
 
   onReorderItem(this: PageInstance<TripPlanPageData>, event: TripPlanPageEvent): void {

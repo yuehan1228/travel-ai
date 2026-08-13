@@ -46,7 +46,13 @@ export interface TripPlanGenerationReservation {
   readonly input: CreateTripInput;
   readonly createdAt: Date;
   readonly operation?:
-    'generate' | 'regenerate-day' | 'restore' | 'edit' | 'replace-item' | 'reorder-items';
+    | 'generate'
+    | 'regenerate-day'
+    | 'restore'
+    | 'edit'
+    | 'replace-item'
+    | 'reorder-items'
+    | 'optimize-order';
   readonly sourceVersion?: number;
   readonly dayNumber?: number;
   readonly itemId?: string;
@@ -138,6 +144,15 @@ export interface TripPlanRepository {
     sourceVersion: number,
     dayNumber: number,
     orderedItemIds: readonly string[],
+    createdAt: Date,
+  ): Promise<TripPlanEditReservationResult>;
+
+  /** Reserve a new immutable version for automatic same-day route ordering. */
+  reserveOptimizeOrder?(
+    userId: string,
+    tripId: string,
+    sourceVersion: number,
+    dayNumber: number,
     createdAt: Date,
   ): Promise<TripPlanEditReservationResult>;
 
@@ -650,7 +665,7 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
     tripId: string,
     sourceVersion: number,
     dayNumber: number,
-    orderedItemIds: readonly string[],
+    orderedItemIds: readonly string[] | undefined,
     createdAt: Date,
   ): Promise<TripPlanEditReservationResult> {
     const database = this.requireDatabase();
@@ -686,9 +701,10 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
       const sourceIds = sourceDay?.items.map((item) => item.id) ?? [];
       if (
         sourceDay === undefined ||
-        sourceIds.length !== orderedItemIds.length ||
-        new Set(orderedItemIds).size !== orderedItemIds.length ||
-        sourceIds.some((itemId) => !orderedItemIds.includes(itemId))
+        (orderedItemIds !== undefined &&
+          (sourceIds.length !== orderedItemIds.length ||
+            new Set(orderedItemIds).size !== orderedItemIds.length ||
+            sourceIds.some((itemId) => !orderedItemIds.includes(itemId))))
       ) {
         return { status: 'source_not_ready' as const };
       }
@@ -760,10 +776,11 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
           userId,
           input: CreateTripInputSchema.parse(trip.inputSnapshot),
           createdAt,
-          operation: 'reorder-items' as const,
+          operation:
+            orderedItemIds === undefined ? ('optimize-order' as const) : ('reorder-items' as const),
           sourceVersion,
           dayNumber,
-          orderedItemIds: [...orderedItemIds],
+          ...(orderedItemIds === undefined ? {} : { orderedItemIds: [...orderedItemIds] }),
           previousTripStatus: owner.status as TripStatus,
         },
       };
@@ -890,6 +907,34 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
     });
   }
 
+  public async reserveOptimizeOrder(
+    userId: string,
+    tripId: string,
+    sourceVersion: number,
+    dayNumber: number,
+    createdAt: Date,
+  ): Promise<TripPlanEditReservationResult> {
+    const reserved = await this.reserveReorderItems(
+      userId,
+      tripId,
+      sourceVersion,
+      dayNumber,
+      undefined,
+      createdAt,
+    );
+    if (reserved.status !== 'reserved') return reserved;
+    return {
+      status: 'reserved',
+      reservation: {
+        ...reserved.reservation,
+        operation: 'optimize-order',
+        sourceVersion,
+        dayNumber,
+        previousTripStatus: reserved.reservation.previousTripStatus,
+      },
+    };
+  }
+
   public reserveItemReplacement(
     userId: string,
     tripId: string,
@@ -1013,7 +1058,8 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
               reservation.operation === 'restore' ||
               reservation.operation === 'edit' ||
               reservation.operation === 'replace-item' ||
-              reservation.operation === 'reorder-items') &&
+              reservation.operation === 'reorder-items' ||
+              reservation.operation === 'optimize-order') &&
             reservation.previousTripStatus === 'ready'
               ? 'ready'
               : 'failed',

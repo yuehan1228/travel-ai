@@ -12,6 +12,7 @@ export * from './trip-plan.clock';
 export * from './trip-plan-diff';
 export * from './trip-plan-edit';
 export * from './trip-plan-reorder';
+export * from './trip-plan-optimize';
 export * from './repositories/trip-plan.repository';
 export * from './config';
 export * from './providers';

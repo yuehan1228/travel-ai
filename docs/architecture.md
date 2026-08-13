@@ -261,6 +261,15 @@ Schema 校验，仅允许 `attraction`、`food`、`hotel` 条目，排除原地�
 
 小程序详情页仅提供原生上移/下移按钮形成按日顺序草稿，并可恢复原顺序；保存为新版本前二次确认，确认后才单飞提交，成功切换版本，失败保留当前攻略和顺序草稿，认证失效继续由 `AuthService` 处理，不引入拖拽库、地图、HTML 或聊天。
 
+### TripPlan 同日 Timeline 自动路线顺序优化（TASK-024）
+
+优化接口 `POST /trips/:id/plan/:version/optimize-order` 使用严格的
+`OptimizeTripPlanDayInput`，只允许服务端根据源版本目标日的真实地点条目确定顺序；可选 `startItemId`/`endItemId` 必须是目标日真实地点且不能相同。纯函数 `optimizeTripPlanDayItems` 只校验完整条目集合并复制快照，不调用 Provider、不估算时间或路线事实。
+
+TripPlanService 在任何路线查询前通过 `operation='optimize-order'` 预留共享 Trip 行级 reservation。随后由 `RouteMatrixService` 获取真实矩阵，`RouteOrderService` 对同一矩阵运行 nearest-neighbor；优化层不直连地图 Provider，不使用直线距离、固定速度、TSP 或伪造路线。真实地点按结果填充原地点槽位，非地点条目保持原相对顺序；使用源条目游览时长、当天最早开始时间和真实相邻路线耗时重算时间，拒绝 unavailable、重叠和跨日结果。
+
+成功快照再次通过完整 `TripPlanSchema`，金额、预算、源版本和其他日期保持不变，并在事务中保存新的不可变 ready 版本。失败只留下 failed 元数据并恢复原 ready 状态；该 reservation 与生成、单日重生成、恢复、编辑、地点替换和手工顺序调整互斥。小程序详情页仅使用原生控件提供可选起点/终点、二次确认、单飞提交和失败保留，不增加地图、拖拽、HTML、导航、聊天、实时价格、Redis 或队列。
+
 ### 小程序 TripPlan 生成流程与只读详情（TASK-018）
 
 首页提交由轻量表单状态转换为严格 `CreateTripInputSchema` 输入，先检查 `AuthService` 登录状态，再保存本地草稿并调用

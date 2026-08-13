@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { TripPlan } from '@travel-guide/shared-types';
+import { TripPlanSchema } from '@travel-guide/shared-schemas';
 
 import { RequestError } from '../services/request-error';
 import {
@@ -18,6 +19,8 @@ import {
   beginTripPlanDiff,
   beginTripPlanVersionRestore,
   beginTripPlanItemReorder,
+  beginTripPlanOptimization,
+  applyTripPlanOptimizationResult,
   createTripPlanDisplayModel,
   createTripPlanViewState,
   createTripPlanViewStateRegistry,
@@ -25,6 +28,8 @@ import {
   formatTripPlanWeather,
   getVisibleTripPlanVersions,
   getReadyTripPlanVersions,
+  getTripPlanOptimizationEndpointOptions,
+  isTripPlanOptimizationConfirmationAccepted,
   isTripPlanReorderConfirmationAccepted,
   moveTripPlanItemInOrder,
   restoreTripPlanItemReorderDraft,
@@ -165,6 +170,8 @@ describe('TripPlan view adapters', () => {
     expect(isTripPlanReorderConfirmationAccepted({ confirm: false })).toBe(false);
     expect(isTripPlanReorderConfirmationAccepted({ cancel: true })).toBe(false);
     expect(isTripPlanReorderConfirmationAccepted({ confirm: true })).toBe(true);
+    expect(isTripPlanOptimizationConfirmationAccepted({ cancel: true })).toBe(false);
+    expect(isTripPlanOptimizationConfirmationAccepted({ confirm: true })).toBe(true);
   });
 
   it('validates URL params before network and rejects malformed versions', () => {
@@ -184,6 +191,50 @@ describe('TripPlan view adapters', () => {
     expect(getVisibleTripPlanVersions(versions)[0]?.status).toBe('failed');
     expect(getReadyTripPlanVersions(versions)).toHaveLength(99);
     expect(getReadyTripPlanVersions(versions).every((item) => item.status === 'ready')).toBe(true);
+  });
+
+  it('exposes only labels for concrete-place optimization picker choices', () => {
+    const options = getTripPlanOptimizationEndpointOptions(
+      createTripPlanDisplayModel(plan).days[0]!,
+    );
+    expect(options).toEqual([{ id: '', label: '不固定' }]);
+    expect(options.map((item) => item.label)).not.toContain(draftFirstId);
+
+    const concrete = TripPlanSchema.parse({
+      ...reorderDraftPlan,
+      days: [
+        {
+          ...reorderDraftPlan.days[0],
+          items: [
+            {
+              ...reorderDraftPlan.days[0]!.items[0]!,
+              type: 'attraction',
+              place: {
+                id: '623e4567-e89b-12d3-a456-426614174000',
+                provider: 'fake-map',
+                providerPlaceId: 'place-1',
+                name: '西湖',
+                category: 'attraction',
+                categoryText: '景点',
+                address: '杭州',
+                location: { longitude: 120.15, latitude: 30.25 },
+                verifiedAt: generatedAt,
+                dataSource: 'cache',
+              },
+              dataSources: ['map_provider'],
+            },
+            reorderDraftPlan.days[0]!.items[1]!,
+          ],
+        },
+      ],
+      budget: { ...reorderDraftPlan.budget, attractionsCny: 1, otherCny: 2 },
+    });
+    expect(
+      getTripPlanOptimizationEndpointOptions(createTripPlanDisplayModel(concrete).days[0]!),
+    ).toEqual([
+      { id: '', label: '不固定' },
+      { id: draftFirstId, label: '一' },
+    ]);
   });
 
   it('renders forecast, climate reference and unavailable weather without inventing measurements', () => {
@@ -436,6 +487,29 @@ describe('TripPlan view adapters', () => {
     expect(nonReady.plan).toEqual(plan);
     expect(nonReady.selectedVersion).toBe(1);
     expect(nonReady.errorMessage).toContain('尚未准备好');
+  });
+
+  it('guards optimization with confirmation state and switches only on a ready result', () => {
+    const state = applyLatestTripPlanResult(createTripPlanViewState(tripId), {
+      items: [readySummary],
+      latestVersion: 1,
+      plan,
+    });
+    const loading = beginTripPlanOptimization(state, 1);
+    expect(loading.optimizingDay).toBe(1);
+    expect(beginTripPlanOptimization(loading, 1)).toBe(loading);
+    const optimized = applyTripPlanOptimizationResult(loading, {
+      tripId,
+      sourceVersion: 1,
+      version: 2,
+      dayNumber: 1,
+      status: 'ready',
+      plan,
+      summary: { ...readySummary, version: 2, id: '723e4567-e89b-12d3-a456-426614174000' },
+    });
+    expect(optimized.selectedVersion).toBe(2);
+    expect(optimized.optimizingDay).toBeUndefined();
+    expect(applyTripPlanViewError(loading, '优化失败').plan).toEqual(plan);
   });
 
   it('isolates state for two detail page instances', () => {

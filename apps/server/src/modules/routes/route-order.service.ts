@@ -70,6 +70,25 @@ export class RouteOrderService {
     }
   }
 
+  /** Apply the same deterministic nearest-neighbor algorithm to an already fetched matrix. */
+  public estimateRouteOrderFromMatrix(
+    matrix: RouteMatrixResult,
+    startId?: string,
+    endId?: string,
+  ): RouteOrderResult {
+    const validatedMatrix = RouteMatrixResultSchema.safeParse(matrix);
+    if (!validatedMatrix.success) throw validationError();
+    try {
+      return calculateNearestNeighborOrder(validatedMatrix.data, startId, endId);
+    } catch (error: unknown) {
+      if (error instanceof RouteOrderAlgorithmError) {
+        if (error.code === 'ROUTE_ORDER_VALIDATION_ERROR') throw validationError();
+        throw unavailableError();
+      }
+      throw providerError();
+    }
+  }
+
   /** Generate an order and its per-step explanation from the same fetched matrix. */
   public async estimateRouteOrderExplanation(
     input: EstimateRouteOrderInput,

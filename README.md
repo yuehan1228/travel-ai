@@ -199,6 +199,15 @@ Trip 行级原子 reservation。成功保存递增的新不可变版本，失败
 `algorithm=nearest_neighbor` 和 `isOptimal=false`，总距离与总耗时只汇总真实矩阵中的可用路线。该算法不保证全局最优，
 不实现精确 TSP、动态规划、LLM 或地图展示；小程序 `RouteOrderService` 负责 Bearer Token 和共享 Schema 响应校验。
 
+### TripPlan 同日 Timeline 自动路线顺序优化（TASK-024）
+
+`POST /trips/:id/plan/:version/optimize-order` 接受严格的
+`{ sourceVersion, dayNumber, startItemId?, endItemId? }`。起点和终点只能引用目标日中带有已验证真实地点的条目，客户端不能提交顺序、地点、坐标、路线、天气、费用或 Provider 事实。
+
+服务端先按 `userId + tripId` 原子预留 `operation='optimize-order'`，再通过既有 `RouteMatrixService` 获取真实 walking/driving 矩阵，并让 `RouteOrderService` 使用确定性的 nearest-neighbor 结果；不直连地图 Provider、不使用直线距离或固定速度。真实地点按结果排序，非地点条目保持原相对位置和确定性槽位语义。服务端使用原游览时长、当天最早开始时间和真实相邻路线耗时重算时间，拒绝 unavailable 路线、时间重叠和跨日结果，预算与金额保持不变。
+
+结果完整通过 `TripPlanSchema`，保存为递增不可变 ready 版本；原版本和其他日期不变。路线或保存失败只记录 failed 元数据并恢复原 ready 状态，且与生成、单日重生成、恢复、编辑、地点替换和手工顺序调整共享 reservation。小程序详情页用原生 selector 从当日真实地点名称选择可选固定起点/终点（不让用户手填内部 ID），提供二次确认、单飞 loading、成功切换和失败恢复；认证失效继续由 `AuthService` 清理令牌。测试只使用 Fake RouteMatrix/RouteOrder/Repository/Clock，不访问真实外部服务。
+
 访问顺序解释使用 `POST /routes/order/explain`，与普通顺序请求复用同一次真实路线矩阵和两点缓存查询。每个决策会列出可用候选
 的真实距离/耗时、不可用候选及排除原因，并明确说明最近邻启发式不保证全局最优；不可用候选不会携带伪造的距离或耗时。解释结果中的
 `order`、`decisions`、`legs` 和汇总字段由严格共享 Zod Schema 校验，Provider 系统性失败和无法覆盖全部点仍分别映射为稳定的

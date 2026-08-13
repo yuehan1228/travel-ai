@@ -8,6 +8,7 @@ import {
   TripPlanSchema,
   TripPlanVersionDiffResultSchema,
   ReorderTripPlanItemsResultSchema,
+  OptimizeTripPlanDayResultSchema,
   TripPlanVersionListResultSchema,
 } from '@travel-guide/shared-schemas';
 import type {
@@ -29,6 +30,7 @@ import type {
   TripPlanVersionSummary,
   TripPlanVersionDiffResult,
   ReorderTripPlanItemsResult,
+  OptimizeTripPlanDayResult,
 } from '@travel-guide/shared-types';
 import { z } from 'zod';
 
@@ -114,6 +116,7 @@ export interface TripPlanViewState {
   readonly selectedVersion?: number;
   readonly isSwitching: boolean;
   readonly regeneratingDay?: number;
+  readonly optimizingDay?: number;
   readonly replacingItem?: string;
   readonly reorderingItem?: string;
   /** Local item-id permutations awaiting an explicit save. */
@@ -156,6 +159,7 @@ export const createTripPlanViewState = (tripId: string): TripPlanViewState => ({
   readyVersions: [],
   isSwitching: false,
   regeneratingDay: undefined,
+  optimizingDay: undefined,
   replacingItem: undefined,
   reorderingItem: undefined,
   reorderDrafts: {},
@@ -237,6 +241,62 @@ export const parseTripPlanReorderResult = (value: unknown): ReorderTripPlanItems
   const parsed = ReorderTripPlanItemsResultSchema.safeParse(value);
   if (!parsed.success || parsed.data.status !== 'ready') throw invalidTripPlanResponse();
   return parsed.data;
+};
+
+export const parseTripPlanOptimizeResult = (value: unknown): OptimizeTripPlanDayResult => {
+  const parsed = OptimizeTripPlanDayResultSchema.safeParse(value);
+  if (!parsed.success || parsed.data.status !== 'ready') throw invalidTripPlanResponse();
+  return parsed.data;
+};
+
+export const beginTripPlanOptimization = (
+  state: TripPlanViewState,
+  dayNumber: number,
+): TripPlanViewState =>
+  state.optimizingDay === undefined &&
+  state.regeneratingDay === undefined &&
+  state.replacingItem === undefined &&
+  state.reorderingItem === undefined &&
+  !state.isEditing &&
+  !state.isSwitching &&
+  state.status === 'ready' &&
+  Number.isSafeInteger(dayNumber) &&
+  dayNumber >= 1 &&
+  dayNumber <= 14
+    ? { ...state, optimizingDay: dayNumber, errorMessage: '' }
+    : state;
+
+export const applyTripPlanOptimizationResult = (
+  state: TripPlanViewState,
+  result: OptimizeTripPlanDayResult,
+): TripPlanViewState => {
+  const parsed = parseTripPlanOptimizeResult(result);
+  if (parsed.tripId !== state.tripId) throw invalidTripPlanResponse();
+  const allVersions = getVisibleTripPlanVersions([
+    parsed.summary,
+    ...state.allVersions.filter((item) => item.version !== parsed.version),
+  ]);
+  return {
+    ...state,
+    status: 'ready',
+    plan: parsed.plan,
+    allVersions,
+    readyVersions: getReadyTripPlanVersions(allVersions),
+    latestVersion: parsed.version,
+    selectedVersion: parsed.version,
+    isSwitching: false,
+    optimizingDay: undefined,
+    regeneratingDay: undefined,
+    replacingItem: undefined,
+    reorderingItem: undefined,
+    reorderDrafts: {},
+    diff: undefined,
+    diffFromVersion: undefined,
+    diffToVersion: undefined,
+    isDiffLoading: false,
+    restoringVersion: undefined,
+    errorMessage: '',
+  };
 };
 
 export const beginTripPlanItemReorder = (
@@ -325,6 +385,9 @@ export const moveTripPlanItemInOrder = (
 export const isTripPlanReorderConfirmationAccepted = (value: unknown): boolean =>
   typeof value === 'object' && value !== null && 'confirm' in value && value.confirm === true;
 
+/** Pure confirmation gate used before an automatic optimization request starts. */
+export const isTripPlanOptimizationConfirmationAccepted = isTripPlanReorderConfirmationAccepted;
+
 export const applyTripPlanReorderResult = (
   state: TripPlanViewState,
   result: ReorderTripPlanItemsResult,
@@ -345,6 +408,7 @@ export const applyTripPlanReorderResult = (
     selectedVersion: parsed.version,
     isSwitching: false,
     regeneratingDay: undefined,
+    optimizingDay: undefined,
     replacingItem: undefined,
     reorderingItem: undefined,
     reorderDrafts: {},
@@ -362,6 +426,7 @@ export const beginTripPlanLoad = (state: TripPlanViewState): TripPlanViewState =
   status: 'loading',
   isSwitching: false,
   regeneratingDay: undefined,
+  optimizingDay: undefined,
   replacingItem: undefined,
   reorderingItem: undefined,
   reorderDrafts: {},
@@ -377,6 +442,7 @@ export const beginTripPlanVersionSwitch = (state: TripPlanViewState): TripPlanVi
         ...state,
         isSwitching: true,
         regeneratingDay: undefined,
+        optimizingDay: undefined,
         replacingItem: undefined,
         reorderingItem: undefined,
         reorderDrafts: {},
@@ -463,6 +529,7 @@ export const applyTripPlanVersionRestoreResult = (
     latestVersion: parsed.version,
     selectedVersion: parsed.version,
     isSwitching: false,
+    optimizingDay: undefined,
     diff: undefined,
     diffFromVersion: undefined,
     diffToVersion: undefined,
@@ -484,6 +551,7 @@ export const beginTripPlanEdit = (
     state.isSwitching ||
     state.restoringVersion !== undefined ||
     state.regeneratingDay !== undefined ||
+    state.optimizingDay !== undefined ||
     hasTripPlanReorderDraft(state) ||
     state.status !== 'ready' ||
     state.selectedVersion !== input.sourceVersion
@@ -513,6 +581,7 @@ export const applyTripPlanEditResult = (
     selectedVersion: parsed.version,
     isSwitching: false,
     regeneratingDay: undefined,
+    optimizingDay: undefined,
     replacingItem: undefined,
     isEditing: false,
     editInput: undefined,
@@ -539,6 +608,7 @@ export const beginTripPlanDayRegeneration = (
     ? {
         ...state,
         regeneratingDay: dayNumber,
+        optimizingDay: undefined,
         replacingItem: undefined,
         reorderingItem: undefined,
         reorderDrafts: {},
@@ -564,6 +634,7 @@ export const applyLatestTripPlanResult = (
     selectedVersion: parsed.latestVersion,
     isSwitching: false,
     regeneratingDay: undefined,
+    optimizingDay: undefined,
     replacingItem: undefined,
     reorderingItem: undefined,
     diff: undefined,
@@ -633,6 +704,7 @@ export const applyTripPlanVersionResult = (
     return {
       ...state,
       isSwitching: false,
+      optimizingDay: undefined,
       errorMessage: '该版本尚未准备好，仍显示当前攻略。',
     };
   }
@@ -644,6 +716,7 @@ export const applyTripPlanVersionResult = (
     selectedVersion: parsed.version,
     isSwitching: false,
     regeneratingDay: undefined,
+    optimizingDay: undefined,
     replacingItem: undefined,
     reorderingItem: undefined,
     reorderDrafts: {},
@@ -665,6 +738,7 @@ export const applyTripPlanDayRegenerationResult = (
     return {
       ...state,
       regeneratingDay: undefined,
+      optimizingDay: undefined,
       errorMessage: '本日攻略尚未准备好，仍显示当前攻略。',
     };
   }
@@ -702,6 +776,7 @@ export const applyTripPlanViewError = (
   status: state.plan === undefined ? 'error' : 'ready',
   isSwitching: false,
   regeneratingDay: undefined,
+  optimizingDay: undefined,
   replacingItem: undefined,
   reorderingItem: undefined,
   isDiffLoading: false,
@@ -741,6 +816,8 @@ export const getTripPlanUserMessage = (error: unknown): string => {
       return '替换地点的真实路线暂时不可用，请稍后重试。';
     case 'TRIP_PLAN_REORDER_UNAVAILABLE':
       return '调整顺序所需的真实路线暂时不可用，请稍后重试。';
+    case 'TRIP_PLAN_OPTIMIZE_UNAVAILABLE':
+      return '自动优化所需的真实路线暂时不可用，请稍后重试。';
     case 'TRIP_PLAN_PROVIDER_ERROR':
     case 'TRIP_PLAN_OUTPUT_INVALID':
     case 'TRIP_PLAN_ENTITY_MISMATCH':
@@ -922,6 +999,21 @@ export interface TripPlanDayPresentation {
   readonly estimatedCostText: string;
   readonly warnings: TripPlanWarningPresentation[];
 }
+
+export interface TripPlanOptimizationEndpointOption {
+  readonly id: string;
+  readonly label: string;
+}
+
+/** Build picker choices from concrete places while keeping internal IDs out of UI labels. */
+export const getTripPlanOptimizationEndpointOptions = (
+  day: TripPlanDayPresentation,
+): TripPlanOptimizationEndpointOption[] => [
+  { id: '', label: '不固定' },
+  ...day.items
+    .filter((item) => item.place !== undefined)
+    .map((item) => ({ id: item.id, label: item.name })),
+];
 
 export interface TripPlanWarningPresentation {
   readonly severityLabel: string;
