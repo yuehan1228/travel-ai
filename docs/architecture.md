@@ -274,7 +274,13 @@ TripPlanService 在任何路线查询前通过 `operation='optimize-order'` 预�
 
 `GET /trips/:id/plan/:version/optimize-audit` 受认证保护，查询始终带 `userId + tripId`，只读取 `ready` 版本，不创建 reservation、不写数据库，也不重新调用 RouteMatrix、地图 Provider、LLM 或天气。共享 strict Schema 将审计候选限制为：available 必须携带真实距离和耗时，unavailable 禁止携带伪造度量；decision 必须逐步对应最终顺序，timeline change 必须对应保存的时间和 RouteEstimate，并明确 nearest-neighbor 不保证全局最优。
 
-TASK-024 的 `trip_plan_versions` 只保存最终 TripPlan 快照，没有保存完整 RouteMatrix、候选排除原因或 RouteOrderExplanation。Repository 因而默认返回 `TRIP_PLAN_AUDIT_UNAVAILABLE`，服务端禁止从最终路线反推候选。保留可选的 evidence repository seam 供未来版本持久化完整审计事实；在证据存在时仍会重新通过完整 Schema、TripPlan、路线度量和可选 sourceVersion 快照校验，任何篡改均稳定失败。小程序详情页仅用原生文本显示可回放审计或证据缺失提示，失败不清空当前攻略，`AUTH_TOKEN_INVALID` 由统一 AuthService 清理。
+TASK-026 已将完整 RouteMatrix、候选排除原因和 RouteOrderExplanation 作为不可变 evidence 与优化目标版本绑定保存；没有 evidence 的历史版本继续返回 `TRIP_PLAN_AUDIT_UNAVAILABLE`，服务端禁止从最终路线反推候选。小程序详情页仅用原生文本显示可回放审计或证据缺失提示，失败不清空当前攻略，`AUTH_TOKEN_INVALID` 由统一 AuthService 清理。
+
+### TripPlan 优化审计证据持久化（TASK-026）
+
+自动优化使用同一次已验证的 RouteMatrix 和 nearest-neighbor Order/Explanation；Explanation 只在内存中从该 Matrix/Order 投影候选和 tie-breaker，不二次调用路线 Provider。成功保存通过 `saveReady` 在一个 Drizzle 事务内完成目标版本、日/条目、`trip_plan_optimization_evidence` 和 Trip `ready` 状态，任何失败都不会留下 ready 版本或孤立证据。证据表以目标 `trip_plan_version_id + day_number` 唯一绑定，保存 Matrix、Order、Explanation JSON、sourceVersion、mode、固定端点和生成时间，外键随版本级联删除；应用启动不自动执行 `0006_trip_plan_optimization_evidence.sql`。
+
+审计读取由 Repository 同时过滤 `userId + tripId + target version + dayNumber + ready`，对三份 JSON 重新执行共享 Schema，并检查 source 版本属于同一 Trip 且 ready、矩阵点与路线、Order/Explanation、目标 TripPlan 时间线一致。缺失 source/evidence 返回 `TRIP_PLAN_AUDIT_UNAVAILABLE`；非法 JSON、跨 Trip、度量/顺序/时间篡改抛出 `TRIP_PLAN_AUDIT_VALIDATION_ERROR`。恢复、编辑、手工重排和其他版本操作只产生新的不可变快照，不修改历史 evidence；不引入清理任务、Redis 或队列。
 
 ### 小程序 TripPlan 生成流程与只读详情（TASK-018）
 

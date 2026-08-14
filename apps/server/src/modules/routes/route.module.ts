@@ -111,6 +111,7 @@ export { RouteOrderService } from './route-order.service';
 export {
   calculateNearestNeighborOrder,
   calculateNearestNeighborOrderWithExplanation,
+  explainRouteOrderResult,
   RouteOrderAlgorithmError,
 } from './route-order.algorithm';
 export type { RouteOrderAlgorithmErrorCode } from './route-order.algorithm';

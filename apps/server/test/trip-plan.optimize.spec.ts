@@ -16,6 +16,7 @@ import type {
 } from '@travel-guide/shared-types';
 
 import { TripPlanService } from '../src/modules/trip-plan/trip-plan.service';
+import { calculateNearestNeighborOrderWithExplanation } from '../src/modules/routes/route-order.algorithm';
 import {
   optimizeTripPlanDayItems,
   TripPlanOptimizeError,
@@ -27,6 +28,7 @@ import type {
   TripPlanRepository,
   TripPlanVersionRecord,
 } from '../src/modules/trip-plan/repositories/trip-plan.repository';
+import type { TripPlanOptimizationEvidenceInput } from '../src/modules/trip-plan/repositories/trip-plan.repository';
 import type { TripRecord, TripRepository } from '../src/modules/trips/repositories/trip.repository';
 
 const tripId = '123e4567-e89b-12d3-a456-426614174000';
@@ -330,6 +332,8 @@ class FakePlanRepository implements TripPlanRepository {
   public constructor(public readonly sourcePlan: TripPlan = plan()) {}
   public targetPlan?: TripPlan;
   public audit?: TripPlanOptimizationAuditResult;
+  public savedEvidence?: TripPlanOptimizationEvidenceInput;
+  public missingSourceVersion?: number;
   public failed = 0;
   public reserved = 0;
   public async reserveGeneration(): Promise<TripPlanGenerationReservationResult> {
@@ -362,10 +366,18 @@ class FakePlanRepository implements TripPlanRepository {
   public async saveReady(
     _user: string,
     _trip: string,
-    _reservation: TripPlanGenerationReservation,
+    reservation: TripPlanGenerationReservation,
     nextPlan: TripPlan,
     generatedAt: Date,
+    evidence?: TripPlanOptimizationEvidenceInput,
   ): Promise<TripPlanVersionRecord> {
+    if (reservation.operation === 'optimize-order' && evidence === undefined) {
+      throw new Error('optimization evidence required');
+    }
+    if (reservation.operation !== 'optimize-order' && evidence !== undefined) {
+      throw new Error('optimization evidence only belongs to optimize-order');
+    }
+    this.savedEvidence = evidence;
     return {
       id: '723e4567-e89b-12d3-a456-426614174000',
       tripId,
@@ -387,7 +399,8 @@ class FakePlanRepository implements TripPlanRepository {
     _user: string,
     _trip: string,
     version: number,
-  ): Promise<TripPlanVersionRecord> {
+  ): Promise<TripPlanVersionRecord | undefined> {
+    if (this.missingSourceVersion === version) return undefined;
     return {
       id: '823e4567-e89b-12d3-a456-426614174000',
       tripId,
@@ -412,6 +425,7 @@ const createService = (
   routeError = false,
   options: {
     tripRecord?: TripRecord;
+    missingTrip?: boolean;
     matrixResult?: RouteMatrixResult;
     orderResult?: RouteOrderResult;
     matrixError?: boolean;
@@ -422,7 +436,9 @@ const createService = (
   const tripRepository: TripRepository = {
     create: vi.fn(),
     listByUserId: vi.fn(),
-    findByIdForUser: vi.fn(async () => options.tripRecord ?? trip()),
+    findByIdForUser: vi.fn(async (ownerId) =>
+      ownerId === userId && !options.missingTrip ? (options.tripRecord ?? trip()) : undefined,
+    ),
     updateByIdForUser: vi.fn(),
     softDeleteByIdForUser: vi.fn(),
   };
@@ -593,6 +609,93 @@ describe('TripPlan same-day optimization', () => {
     ).rejects.toMatchObject({ code: 'TRIP_PLAN_AUDIT_VALIDATION_ERROR' });
   });
 
+  it('fails closed when the persisted audit source version is missing or owned by another user', async () => {
+    const setup = createService();
+    setup.repository.audit = {
+      tripId,
+      version: 2,
+      sourceVersion: 1,
+      dayNumber: 1,
+      mode: 'walking',
+      algorithm: 'nearest_neighbor',
+      isOptimal: false,
+      orderedItemIds: [secondId, firstId],
+      decisions: [
+        {
+          step: 1,
+          originItemId: secondId,
+          selectedDestinationItemId: firstId,
+          reason: 'shortest_duration',
+          candidates: [
+            {
+              destinationItemId: firstId,
+              status: 'available',
+              durationSeconds: 120,
+              distanceMeters: 100,
+            },
+          ],
+        },
+      ],
+      timelineChanges: [
+        {
+          itemId: secondId,
+          previousStartTime: '10:30',
+          previousEndTime: '11:30',
+          nextStartTime: '09:00',
+          nextEndTime: '10:00',
+          routeStatus: 'not_applicable',
+        },
+        {
+          itemId: firstId,
+          previousStartTime: '09:00',
+          previousEndTime: '10:00',
+          nextStartTime: '10:02',
+          nextEndTime: '11:02',
+          routeStatus: 'available',
+          routeDurationSeconds: 120,
+          routeDistanceMeters: 100,
+        },
+      ],
+      warnings: ['Nearest-neighbor is deterministic but not globally optimal.'],
+      generatedAt: now.toISOString(),
+    };
+    setup.repository.targetPlan = TripPlanSchema.parse({
+      ...setup.repository.sourcePlan,
+      days: [
+        {
+          ...setup.repository.sourcePlan.days[0]!,
+          items: [
+            {
+              ...setup.repository.sourcePlan.days[0]!.items[1]!,
+              startTime: '09:00',
+              endTime: '10:00',
+            },
+            {
+              ...setup.repository.sourcePlan.days[0]!.items[0]!,
+              startTime: '10:02',
+              endTime: '11:02',
+              route: estimate,
+              dataSources: ['map_provider', 'route_provider'],
+            },
+          ],
+        },
+      ],
+    });
+    setup.repository.missingSourceVersion = 1;
+    await expect(
+      setup.service.getTripPlanOptimizationAudit(userId, tripId, 2, { dayNumber: 1 }),
+    ).rejects.toMatchObject({ code: 'TRIP_PLAN_AUDIT_VALIDATION_ERROR' });
+  });
+
+  it('does not expose an audit across users and does not call the repository evidence reader', async () => {
+    const setup = createService(plan(), false, { missingTrip: true });
+    const auditReader = vi.spyOn(setup.repository, 'findOptimizationAuditForUser');
+    await expect(
+      setup.service.getTripPlanOptimizationAudit(userId, tripId, 2, { dayNumber: 1 }),
+    ).rejects.toMatchObject({ code: 'TRIP_NOT_FOUND' });
+    expect(auditReader).not.toHaveBeenCalled();
+  });
+
   it('reserves before matrix/order, preserves amounts, and creates a new timed version', async () => {
     const setup = createService();
     const result = await setup.service.optimizeTripPlanDay(userId, tripId, 1, {
@@ -609,6 +712,112 @@ describe('TripPlan same-day optimization', () => {
       ['10:02', '11:02'],
     ]);
     expect(result.plan.budget.totalCny).toBe(3);
+  });
+
+  it('persists TASK-026 evidence from the one matrix/order result without a second provider call', async () => {
+    const setup = createService();
+    const result = await setup.service.optimizeTripPlanDay(userId, tripId, 1, {
+      sourceVersion: 1,
+      dayNumber: 1,
+      startItemId: secondId,
+      endItemId: firstId,
+    });
+    expect(result.status).toBe('ready');
+    expect(setup.events).toEqual(['reserve', 'matrix', 'order']);
+    expect(setup.repository.savedEvidence).toBeDefined();
+    expect(setup.repository.savedEvidence?.sourceVersion).toBe(1);
+    expect(setup.repository.savedEvidence?.mode).toBe('walking');
+    expect(setup.repository.savedEvidence?.startItemId).toBe(secondId);
+    expect(setup.repository.savedEvidence?.endItemId).toBe(firstId);
+    expect(setup.repository.savedEvidence?.orderSnapshot).toEqual(order);
+    expect(setup.repository.savedEvidence?.explanationSnapshot.order).toEqual(order);
+    expect(setup.repository.savedEvidence?.matrixSnapshot).toEqual(matrix);
+  });
+
+  it('rejects missing evidence for optimize-order and evidence on non-optimization operations', async () => {
+    const repository = new FakePlanRepository();
+    const reservation: TripPlanGenerationReservation = {
+      versionId: '723e4567-e89b-12d3-a456-426614174000',
+      version: 2,
+      tripId,
+      userId,
+      input,
+      createdAt: now,
+      operation: 'optimize-order',
+      sourceVersion: 1,
+      dayNumber: 1,
+    };
+    await expect(repository.saveReady(userId, tripId, reservation, plan(), now)).rejects.toThrow(
+      'optimization evidence required',
+    );
+    const evidence: TripPlanOptimizationEvidenceInput = {
+      sourceVersion: 1,
+      dayNumber: 1,
+      mode: 'walking',
+      matrixSnapshot: matrix,
+      orderSnapshot: order,
+      explanationSnapshot: calculateNearestNeighborOrderWithExplanation(matrix, secondId, firstId),
+      generatedAt: now,
+    };
+    await expect(
+      repository.saveReady(
+        userId,
+        tripId,
+        { ...reservation, operation: 'reorder-items' },
+        plan(),
+        now,
+        evidence,
+      ),
+    ).rejects.toThrow('optimization evidence only belongs to optimize-order');
+    expect(repository.savedEvidence).toBeUndefined();
+  });
+
+  it('captures driving evidence and preserves unavailable candidate semantics', async () => {
+    const drivingTrip = {
+      ...trip(),
+      inputSnapshot: { ...input, transportPreference: 'driving' as const },
+    };
+    const setup = createService(plan(), false, {
+      tripRecord: drivingTrip,
+      matrixResult: drivingMatrix,
+      orderResult: drivingOrder,
+    });
+    await setup.service.optimizeTripPlanDay(userId, tripId, 1, {
+      sourceVersion: 1,
+      dayNumber: 1,
+      startItemId: secondId,
+      endItemId: firstId,
+    });
+    expect(setup.repository.savedEvidence?.mode).toBe('driving');
+    const unavailablePairs = setup.repository.savedEvidence?.explanationSnapshot.unavailablePairs;
+    expect(unavailablePairs).toEqual([]);
+    expect(
+      setup.repository.savedEvidence?.explanationSnapshot.decisions[0]?.candidates.every(
+        (candidate) =>
+          candidate.status === 'available' ||
+          (candidate.durationSeconds === undefined && candidate.distanceMeters === undefined),
+      ),
+    ).toBe(true);
+
+    const unavailableMatrix = RouteMatrixResultSchema.parse({
+      ...matrixThree,
+      cells: matrixThree.cells.map((cell) =>
+        cell.originId === secondId && cell.destinationId === firstId
+          ? { originId: cell.originId, destinationId: cell.destinationId, status: 'unavailable' }
+          : cell,
+      ),
+    });
+    const explanation = calculateNearestNeighborOrderWithExplanation(
+      unavailableMatrix,
+      secondId,
+      firstId,
+    );
+    const unavailable = explanation.decisions[0]?.candidates.find(
+      (candidate) => candidate.destinationId === firstId,
+    );
+    expect(unavailable?.status).toBe('unavailable');
+    expect(unavailable?.durationSeconds).toBeUndefined();
+    expect(unavailable?.distanceMeters).toBeUndefined();
   });
 
   it('keeps a non-place slot while applying the real leg to the next place', async () => {

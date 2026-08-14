@@ -89,6 +89,25 @@ export class RouteOrderService {
     }
   }
 
+  /** Apply nearest-neighbor once and retain its exact explanation for audit persistence. */
+  public estimateRouteOrderExplanationFromMatrix(
+    matrix: RouteMatrixResult,
+    startId?: string,
+    endId?: string,
+  ): RouteOrderExplanationResult {
+    const validatedMatrix = RouteMatrixResultSchema.safeParse(matrix);
+    if (!validatedMatrix.success) throw validationError();
+    try {
+      return calculateNearestNeighborOrderWithExplanation(validatedMatrix.data, startId, endId);
+    } catch (error: unknown) {
+      if (error instanceof RouteOrderAlgorithmError) {
+        if (error.code === 'ROUTE_ORDER_VALIDATION_ERROR') throw validationError();
+        throw unavailableError();
+      }
+      throw providerError();
+    }
+  }
+
   /** Generate an order and its per-step explanation from the same fetched matrix. */
   public async estimateRouteOrderExplanation(
     input: EstimateRouteOrderInput,

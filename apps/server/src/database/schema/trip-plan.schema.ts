@@ -7,6 +7,7 @@ import {
   jsonb,
   numeric,
   pgTable,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -22,6 +23,9 @@ import type {
   TripPlanDataSource,
   TripPlanItemType,
   TripPlanWarning,
+  RouteMatrixResult,
+  RouteOrderResult,
+  RouteOrderExplanationResult,
 } from '@travel-guide/shared-types';
 
 import { trips } from './trips.schema';
@@ -116,9 +120,59 @@ export const tripPlanItems = pgTable(
   ],
 );
 
+/**
+ * Immutable facts produced by one successful automatic optimization.
+ * Matrix/order/explanation are stored separately from the user-facing plan so
+ * an audit can replay the exact candidate set without calling a Provider.
+ */
+export const tripPlanOptimizationEvidence = pgTable(
+  'trip_plan_optimization_evidence',
+  {
+    id: uuid('id').primaryKey(),
+    versionId: uuid('trip_plan_version_id')
+      .notNull()
+      .references(() => tripPlanVersions.id, { onDelete: 'cascade' }),
+    tripId: uuid('trip_id')
+      .notNull()
+      .references(() => trips.id, { onDelete: 'cascade' }),
+    sourceVersion: integer('source_version').notNull(),
+    dayNumber: smallint('day_number').notNull(),
+    mode: varchar('mode', { length: 16 }).notNull(),
+    evidenceVersion: varchar('evidence_version', { length: 16 }).notNull(),
+    startItemId: uuid('start_item_id'),
+    endItemId: uuid('end_item_id'),
+    matrixSnapshot: jsonb('matrix_snapshot').$type<RouteMatrixResult>().notNull(),
+    orderSnapshot: jsonb('order_snapshot').$type<RouteOrderResult>().notNull(),
+    explanationSnapshot: jsonb('explanation_snapshot')
+      .$type<RouteOrderExplanationResult>()
+      .notNull(),
+    generatedAt: timestamp('generated_at', { withTimezone: true, mode: 'date' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('trip_plan_optimization_evidence_version_day_unique').on(
+      table.versionId,
+      table.dayNumber,
+    ),
+    index('trip_plan_optimization_evidence_trip_idx').on(table.tripId, table.sourceVersion),
+    check('trip_plan_optimization_evidence_source_version_check', sql`${table.sourceVersion} >= 1`),
+    check(
+      'trip_plan_optimization_evidence_day_number_check',
+      sql`${table.dayNumber} between 1 and 14`,
+    ),
+    check(
+      'trip_plan_optimization_evidence_mode_check',
+      sql`${table.mode} in ('walking', 'driving')`,
+    ),
+    check('trip_plan_optimization_evidence_version_check', sql`${table.evidenceVersion} = '1.0'`),
+  ],
+);
+
 export type TripPlanVersion = typeof tripPlanVersions.$inferSelect;
 export type NewTripPlanVersion = typeof tripPlanVersions.$inferInsert;
 export type TripPlanDay = typeof tripPlanDays.$inferSelect;
 export type NewTripPlanDay = typeof tripPlanDays.$inferInsert;
 export type TripPlanItem = typeof tripPlanItems.$inferSelect;
 export type NewTripPlanItem = typeof tripPlanItems.$inferInsert;
+export type TripPlanOptimizationEvidence = typeof tripPlanOptimizationEvidence.$inferSelect;
+export type NewTripPlanOptimizationEvidence = typeof tripPlanOptimizationEvidence.$inferInsert;

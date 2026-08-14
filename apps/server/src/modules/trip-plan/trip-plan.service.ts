@@ -27,6 +27,7 @@ import {
   TripPlanGenerationResultSchema,
   TripPlanSchema,
   RouteMatrixResultSchema,
+  RouteOrderExplanationResultSchema,
   RouteOrderResultSchema,
   TripPlanVersionListResultSchema,
   WeatherResultSchema,
@@ -56,6 +57,7 @@ import type {
   TripPlanVersionListResult,
   RouteEstimate,
   RouteOrderResult,
+  RouteOrderExplanationResult,
   RouteMatrixResult,
   WeatherResult,
   TripPlanItemReplacementCandidateList,
@@ -88,6 +90,8 @@ import { TripPlanGenerationService } from './trip-plan-generation.service';
 import { applyTripPlanEdits, TripPlanEditError } from './trip-plan-edit';
 import { reorderTripPlanDayItems, TripPlanReorderError } from './trip-plan-reorder';
 import { optimizeTripPlanDayItems, TripPlanOptimizeError } from './trip-plan-optimize';
+import { explainRouteOrderResult } from '../routes/route-order.algorithm';
+import { TripPlanAuditValidationError } from './repositories/trip-plan.repository';
 import {
   compareTripPlanVersions,
   TripPlanDiffValidationError,
@@ -129,6 +133,11 @@ export interface TripPlanRouteOrderReader {
     startId?: string,
     endId?: string,
   ): RouteOrderResult;
+  estimateRouteOrderExplanationFromMatrix?(
+    matrix: RouteMatrixResult,
+    startId?: string,
+    endId?: string,
+  ): RouteOrderExplanationResult;
 }
 
 export interface TripPlanRouteMatrixReader {
@@ -1707,27 +1716,56 @@ export class TripPlanService {
       if (!parsedMatrix.success) throw providerError();
       const matrix = parsedMatrix.data;
       if (!validateMatrixAgainstPoints(matrix, points, mode)) throw providerError();
-      if (this.routeOrderService.estimateRouteOrderFromMatrix === undefined) {
+      if (
+        this.routeOrderService.estimateRouteOrderExplanationFromMatrix === undefined &&
+        this.routeOrderService.estimateRouteOrderFromMatrix === undefined
+      ) {
         throw optimizeUnavailableError();
       }
-      const rawOrder = this.routeOrderService.estimateRouteOrderFromMatrix(
-        matrix,
-        parsedInput.data.startItemId,
-        parsedInput.data.endItemId,
-      );
-      const parsedOrder = RouteOrderResultSchema.safeParse(rawOrder);
-      if (!parsedOrder.success || parsedOrder.data.mode !== mode) throw providerError();
+      let parsedOrder: ReturnType<typeof RouteOrderResultSchema.parse>;
+      let explanation: RouteOrderExplanationResult;
+      if (this.routeOrderService.estimateRouteOrderExplanationFromMatrix !== undefined) {
+        explanation = this.routeOrderService.estimateRouteOrderExplanationFromMatrix(
+          matrix,
+          parsedInput.data.startItemId,
+          parsedInput.data.endItemId,
+        );
+        const parsedExplanation = RouteOrderExplanationResultSchema.safeParse(explanation);
+        if (!parsedExplanation.success || parsedExplanation.data.order.mode !== mode) {
+          throw providerError();
+        }
+        parsedOrder = parsedExplanation.data.order;
+        explanation = parsedExplanation.data;
+      } else {
+        if (this.routeOrderService.estimateRouteOrderFromMatrix === undefined) {
+          throw optimizeUnavailableError();
+        }
+        const rawOrder = this.routeOrderService.estimateRouteOrderFromMatrix(
+          matrix,
+          parsedInput.data.startItemId,
+          parsedInput.data.endItemId,
+        );
+        const parsedRawOrder = RouteOrderResultSchema.safeParse(rawOrder);
+        if (!parsedRawOrder.success || parsedRawOrder.data.mode !== mode) throw providerError();
+        parsedOrder = parsedRawOrder.data;
+        explanation = explainRouteOrderResult(
+          matrix,
+          parsedOrder,
+          parsedInput.data.startItemId,
+          parsedInput.data.endItemId,
+        );
+      }
       if (
         !validateOrderAgainstMatrix(
           matrix,
-          parsedOrder.data,
+          parsedOrder,
           parsedInput.data.startItemId,
           parsedInput.data.endItemId,
         )
       ) {
         throw optimizeUnavailableError();
       }
-      const orderedRealIds = parsedOrder.data.orderedPointIds;
+      const orderedRealIds = parsedOrder.orderedPointIds;
       if (
         orderedRealIds.length !== realItemIds.length ||
         new Set(orderedRealIds).size !== orderedRealIds.length ||
@@ -1748,12 +1786,26 @@ export class TripPlanService {
       const optimizedPlan = optimizeTimelineWithRoutes(
         orderedPlan,
         parsedInput.data.dayNumber,
-        parsedOrder.data,
+        parsedOrder,
         now.toISOString(),
       );
       let saved: TripPlanVersionRecord;
       try {
-        saved = await this.repository.saveReady(userId, tripId, reservation, optimizedPlan, now);
+        saved = await this.repository.saveReady(userId, tripId, reservation, optimizedPlan, now, {
+          sourceVersion: version,
+          dayNumber: parsedInput.data.dayNumber,
+          mode,
+          ...(parsedInput.data.startItemId === undefined
+            ? {}
+            : { startItemId: parsedInput.data.startItemId }),
+          ...(parsedInput.data.endItemId === undefined
+            ? {}
+            : { endItemId: parsedInput.data.endItemId }),
+          matrixSnapshot: matrix,
+          orderSnapshot: parsedOrder,
+          explanationSnapshot: explanation,
+          generatedAt: now,
+        });
       } catch {
         throw persistenceError();
       }
@@ -2161,9 +2213,8 @@ export class TripPlanService {
 
   /**
    * Read an already persisted optimization explanation without performing any
-   * reservation, write, route lookup, or provider call. TASK-024 did not
-   * persist RouteMatrix/RouteOrder candidates, so the default repository
-   * deliberately returns TRIP_PLAN_AUDIT_UNAVAILABLE.
+   * reservation, write, route lookup, or provider call. Evidence is read-only
+   * and must have been captured by the optimize-order transaction.
    */
   public async getTripPlanOptimizationAudit(
     userId: string,
@@ -2213,7 +2264,8 @@ export class TripPlanService {
         version,
         parsedInput.data.dayNumber,
       );
-    } catch {
+    } catch (error: unknown) {
+      if (error instanceof TripPlanAuditValidationError) throw auditValidationError();
       throw persistenceError();
     }
     if (rawAudit === undefined) throw auditUnavailableError();
@@ -2238,7 +2290,7 @@ export class TripPlanService {
       throw persistenceError();
     }
     if (sourceRecord?.status !== 'ready' || sourceRecord.plan === undefined) {
-      throw auditUnavailableError();
+      throw auditValidationError();
     }
     const parsedSource = TripPlanSchema.safeParse(sourceRecord.plan);
     if (!parsedSource.success || parsedSource.data.tripId !== tripId) {

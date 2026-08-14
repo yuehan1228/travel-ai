@@ -3,7 +3,13 @@ import { resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { routeCache, trips, users, weatherCache } from '../src/database/schema';
+import {
+  routeCache,
+  tripPlanOptimizationEvidence,
+  trips,
+  users,
+  weatherCache,
+} from '../src/database/schema';
 
 function readInitialMigration(): string {
   const migrationDirectory = resolve(__dirname, '../migrations');
@@ -81,5 +87,28 @@ describe('database schema', () => {
     expect(migration).toContain('route_cache_cache_key_unique');
     expect(migration).toContain('route_cache_expires_idx');
     expect(migration).toContain('route_cache_mode_check');
+  });
+
+  it('keeps TASK-026 optimization evidence schema and migration reviewable', () => {
+    expect(tripPlanOptimizationEvidence.versionId.name).toBe('trip_plan_version_id');
+    expect(tripPlanOptimizationEvidence.matrixSnapshot.getSQLType()).toBe('jsonb');
+    expect(tripPlanOptimizationEvidence.orderSnapshot.getSQLType()).toBe('jsonb');
+    expect(tripPlanOptimizationEvidence.explanationSnapshot.getSQLType()).toBe('jsonb');
+    expect(tripPlanOptimizationEvidence.dayNumber.getSQLType()).toBe('smallint');
+
+    const migrationDirectory = resolve(__dirname, '../migrations');
+    const migrationName = readdirSync(migrationDirectory).find((name) =>
+      name.includes('optimization_evidence'),
+    );
+    expect(migrationName).toBeDefined();
+    const migration = readFileSync(resolve(migrationDirectory, migrationName!), 'utf8');
+    expect(migration).toContain('CREATE TABLE "trip_plan_optimization_evidence"');
+    expect(migration).toContain('trip_plan_optimization_evidence_version_day_unique');
+    expect(migration).toContain('ON DELETE cascade');
+    expect(migration).toContain('trip_plan_optimization_evidence_mode_check');
+    expect(migration).toContain('trip_plan_optimization_evidence_day_number_check');
+    expect(migration).toContain('trip_plan_optimization_evidence_trip_idx');
+    const journal = readFileSync(resolve(migrationDirectory, 'meta/_journal.json'), 'utf8');
+    expect(journal).toContain('0006_trip_plan_optimization_evidence');
   });
 });

@@ -4,11 +4,19 @@ import { randomUUID } from 'node:crypto';
 
 import {
   CreateTripInputSchema,
+  RouteMatrixResultSchema,
+  RouteOrderExplanationResultSchema,
+  RouteOrderResultSchema,
   TripPlanSchema,
+  TripPlanOptimizationAuditResultSchema,
   TripPlanVersionStatusSchema,
 } from '@travel-guide/shared-schemas';
 import type {
   CreateTripInput,
+  RouteMatrixResult,
+  RouteMode,
+  RouteOrderExplanationResult,
+  RouteOrderResult,
   TripPlan,
   TripPlanGenerationResult,
   TripPlanVersionStatus,
@@ -22,6 +30,7 @@ import type { Database } from '../../../database/database.types';
 import {
   tripPlanDays,
   tripPlanItems,
+  tripPlanOptimizationEvidence,
   tripPlanVersions,
   type TripPlanVersion,
 } from '../../../database/schema/trip-plan.schema';
@@ -60,6 +69,29 @@ export interface TripPlanGenerationReservation {
   readonly orderedItemIds?: readonly string[];
   readonly instruction?: string;
   readonly previousTripStatus?: TripStatus;
+}
+
+/** Evidence captured from the exact matrix/order/explanation used by optimize-order. */
+export interface TripPlanOptimizationEvidenceInput {
+  readonly sourceVersion: number;
+  readonly dayNumber: number;
+  readonly mode: RouteMode;
+  readonly startItemId?: string;
+  readonly endItemId?: string;
+  readonly matrixSnapshot: RouteMatrixResult;
+  readonly orderSnapshot: RouteOrderResult;
+  readonly explanationSnapshot: RouteOrderExplanationResult;
+  readonly generatedAt: Date;
+}
+
+/** Raised when persisted evidence cannot be safely replayed. */
+export class TripPlanAuditValidationError extends Error {
+  public readonly code = 'TRIP_PLAN_AUDIT_VALIDATION_ERROR' as const;
+
+  public constructor(message = 'Stored TripPlan optimization evidence is invalid') {
+    super(message);
+    this.name = 'TripPlanAuditValidationError';
+  }
 }
 
 export type TripPlanGenerationReservationResult =
@@ -163,6 +195,7 @@ export interface TripPlanRepository {
     reservation: TripPlanGenerationReservation,
     plan: TripPlan,
     generatedAt: Date,
+    optimizationEvidence?: TripPlanOptimizationEvidenceInput,
   ): Promise<TripPlanVersionRecord>;
 
   markFailed(
@@ -180,11 +213,7 @@ export interface TripPlanRepository {
     version: number,
   ): Promise<TripPlanVersionRecord | undefined>;
 
-  /**
-   * Optional persisted optimization evidence. TASK-024 snapshots did not store
-   * RouteMatrix/RouteOrder candidates, so the default adapter returns undefined
-   * and callers must fail closed with AUDIT_UNAVAILABLE.
-   */
+  /** Optional persisted optimization evidence; absent rows fail closed as unavailable. */
   findOptimizationAuditForUser?(
     userId: string,
     tripId: string,
@@ -207,6 +236,17 @@ const parseStoredPlan = (value: unknown, status: TripPlanVersionStatus): TripPla
   if (!parsed.success) throw new Error('Stored TripPlan snapshot is invalid');
   return parsed.data;
 };
+
+const sameStringArray = (left: readonly string[], right: readonly string[]): boolean =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
+const timeToMinutes = (value: string): number => {
+  const [hours, minutes] = value.split(':').map(Number);
+  return hours * 60 + minutes;
+};
+
+const minutesToTime = (value: number): string =>
+  `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
 
 const toRecord = (version: TripPlanVersion): TripPlanVersionRecord => {
   const status = parseVersionStatus(version.status);
@@ -964,9 +1004,41 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
     reservation: TripPlanGenerationReservation,
     plan: TripPlan,
     generatedAt: Date,
+    optimizationEvidence?: TripPlanOptimizationEvidenceInput,
   ): Promise<TripPlanVersionRecord> {
     const database = this.requireDatabase();
     const validatedPlan = TripPlanSchema.parse(plan);
+    if (optimizationEvidence !== undefined && reservation.operation !== 'optimize-order') {
+      throw new Error('Optimization evidence requires an optimize-order reservation');
+    }
+    if (reservation.operation === 'optimize-order' && optimizationEvidence === undefined) {
+      throw new Error('Optimization evidence is required for optimize-order');
+    }
+    if (optimizationEvidence !== undefined) {
+      if (
+        optimizationEvidence.sourceVersion !== reservation.sourceVersion ||
+        optimizationEvidence.dayNumber !== reservation.dayNumber ||
+        optimizationEvidence.mode !== optimizationEvidence.matrixSnapshot.mode ||
+        optimizationEvidence.mode !== optimizationEvidence.orderSnapshot.mode ||
+        JSON.stringify(optimizationEvidence.explanationSnapshot.order) !==
+          JSON.stringify(optimizationEvidence.orderSnapshot) ||
+        optimizationEvidence.generatedAt.getTime() !== generatedAt.getTime()
+      ) {
+        throw new Error('Optimization evidence does not match its reservation');
+      }
+      if (!RouteMatrixResultSchema.safeParse(optimizationEvidence.matrixSnapshot).success) {
+        throw new TripPlanAuditValidationError();
+      }
+      if (!RouteOrderResultSchema.safeParse(optimizationEvidence.orderSnapshot).success) {
+        throw new TripPlanAuditValidationError();
+      }
+      if (
+        !RouteOrderExplanationResultSchema.safeParse(optimizationEvidence.explanationSnapshot)
+          .success
+      ) {
+        throw new TripPlanAuditValidationError();
+      }
+    }
     return database.transaction(async (tx) => {
       const ownerTrip = await tx
         .select({ id: trips.id })
@@ -1021,6 +1093,37 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
             })),
           );
         }
+      }
+
+      if (optimizationEvidence !== undefined) {
+        const source = await tx
+          .select({ id: tripPlanVersions.id })
+          .from(tripPlanVersions)
+          .where(
+            and(
+              eq(tripPlanVersions.tripId, tripId),
+              eq(tripPlanVersions.version, optimizationEvidence.sourceVersion),
+              eq(tripPlanVersions.status, 'ready'),
+            ),
+          )
+          .limit(1);
+        if (source.length === 0) throw new Error('Optimization source version is not ready');
+
+        await tx.insert(tripPlanOptimizationEvidence).values({
+          id: randomUUID(),
+          versionId: reservation.versionId,
+          tripId,
+          sourceVersion: optimizationEvidence.sourceVersion,
+          dayNumber: optimizationEvidence.dayNumber,
+          mode: optimizationEvidence.mode,
+          evidenceVersion: '1.0',
+          startItemId: optimizationEvidence.startItemId,
+          endItemId: optimizationEvidence.endItemId,
+          matrixSnapshot: optimizationEvidence.matrixSnapshot,
+          orderSnapshot: optimizationEvidence.orderSnapshot,
+          explanationSnapshot: optimizationEvidence.explanationSnapshot,
+          generatedAt: optimizationEvidence.generatedAt,
+        });
       }
 
       const tripUpdate = await tx
@@ -1134,13 +1237,259 @@ export class DrizzleTripPlanRepository implements TripPlanRepository {
     version: number,
     dayNumber: number,
   ): Promise<TripPlanOptimizationAuditResult | undefined> {
-    void userId;
-    void tripId;
-    void version;
-    void dayNumber;
-    // No TASK-024 migration persisted the RouteMatrix/RouteOrder explanation.
-    // Do not reconstruct candidate measurements from the final TripPlan legs.
-    return undefined;
+    const database = this.requireDatabase();
+    const rows = await database
+      .select({ evidence: tripPlanOptimizationEvidence, target: tripPlanVersions })
+      .from(tripPlanOptimizationEvidence)
+      .innerJoin(tripPlanVersions, eq(tripPlanVersions.id, tripPlanOptimizationEvidence.versionId))
+      .innerJoin(trips, eq(trips.id, tripPlanOptimizationEvidence.tripId))
+      .where(
+        and(
+          eq(trips.userId, userId),
+          eq(trips.id, tripId),
+          isNull(trips.deletedAt),
+          eq(tripPlanVersions.tripId, tripId),
+          eq(tripPlanVersions.version, version),
+          eq(tripPlanVersions.status, 'ready'),
+          eq(tripPlanOptimizationEvidence.dayNumber, dayNumber),
+        ),
+      )
+      .limit(1);
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    const evidence = row.evidence;
+    if (
+      evidence.tripId !== tripId ||
+      evidence.versionId !== row.target.id ||
+      evidence.mode !== evidence.matrixSnapshot.mode ||
+      evidence.mode !== evidence.orderSnapshot.mode ||
+      evidence.evidenceVersion !== '1.0' ||
+      row.target.generatedAt === null ||
+      evidence.generatedAt.getTime() !== row.target.generatedAt.getTime()
+    ) {
+      throw new TripPlanAuditValidationError();
+    }
+
+    const matrix = RouteMatrixResultSchema.safeParse(evidence.matrixSnapshot);
+    const order = RouteOrderResultSchema.safeParse(evidence.orderSnapshot);
+    const explanation = RouteOrderExplanationResultSchema.safeParse(evidence.explanationSnapshot);
+    if (!matrix.success || !order.success || !explanation.success) {
+      throw new TripPlanAuditValidationError();
+    }
+    const matrixCellByPair = new Map(
+      matrix.data.cells.map((cell) => [`${cell.originId}\u0000${cell.destinationId}`, cell]),
+    );
+    for (const leg of order.data.legs) {
+      const cell = matrixCellByPair.get(`${leg.originId}\u0000${leg.destinationId}`);
+      if (
+        cell?.status !== 'available' ||
+        cell.estimate === undefined ||
+        cell.estimate.dataSource === 'unavailable' ||
+        cell.estimate.distanceMeters !== leg.estimate.distanceMeters ||
+        cell.estimate.durationSeconds !== leg.estimate.durationSeconds
+      ) {
+        throw new TripPlanAuditValidationError();
+      }
+    }
+    for (const decision of explanation.data.decisions) {
+      for (const candidate of decision.candidates) {
+        const cell = matrixCellByPair.get(`${decision.originId}\u0000${candidate.destinationId}`);
+        if (cell === undefined) throw new TripPlanAuditValidationError();
+        if (candidate.status === 'unavailable') {
+          if (cell.status !== 'unavailable' || candidate.rejectionReason !== 'route_unavailable') {
+            throw new TripPlanAuditValidationError();
+          }
+          continue;
+        }
+        if (
+          cell.status !== 'available' ||
+          cell.estimate === undefined ||
+          cell.estimate.dataSource === 'unavailable' ||
+          candidate.durationSeconds !== cell.estimate.durationSeconds ||
+          candidate.distanceMeters !== cell.estimate.distanceMeters ||
+          (candidate.rejectionReason !== undefined && candidate.rejectionReason !== 'fixed_end')
+        ) {
+          throw new TripPlanAuditValidationError();
+        }
+      }
+    }
+    if (
+      explanation.data.order.mode !== order.data.mode ||
+      explanation.data.order.algorithm !== order.data.algorithm ||
+      explanation.data.order.isOptimal !== order.data.isOptimal ||
+      explanation.data.order.totalDistanceMeters !== order.data.totalDistanceMeters ||
+      explanation.data.order.totalDurationSeconds !== order.data.totalDurationSeconds ||
+      explanation.data.order.generatedAt !== order.data.generatedAt ||
+      order.data.generatedAt !== matrix.data.generatedAt ||
+      !sameStringArray(explanation.data.order.warnings, order.data.warnings) ||
+      explanation.data.order.orderedPointIds.length !== order.data.orderedPointIds.length ||
+      explanation.data.order.orderedPointIds.some(
+        (id, index) => id !== order.data.orderedPointIds[index],
+      )
+    ) {
+      throw new TripPlanAuditValidationError();
+    }
+
+    const targetPlanParsed = TripPlanSchema.safeParse(row.target.planSnapshot);
+    if (!targetPlanParsed.success || targetPlanParsed.data.tripId !== tripId) {
+      throw new TripPlanAuditValidationError();
+    }
+    const sourceRows = await database
+      .select({ version: tripPlanVersions })
+      .from(tripPlanVersions)
+      .innerJoin(trips, eq(trips.id, tripPlanVersions.tripId))
+      .where(
+        and(
+          eq(trips.userId, userId),
+          eq(trips.id, tripId),
+          isNull(trips.deletedAt),
+          eq(tripPlanVersions.tripId, tripId),
+          eq(tripPlanVersions.version, evidence.sourceVersion),
+          eq(tripPlanVersions.status, 'ready'),
+        ),
+      )
+      .limit(1);
+    const sourceRow = sourceRows[0]?.version;
+    if (sourceRow === undefined) throw new TripPlanAuditValidationError();
+    const sourcePlanParsed = TripPlanSchema.safeParse(sourceRow.planSnapshot);
+    if (!sourcePlanParsed.success || sourcePlanParsed.data.tripId !== tripId) {
+      throw new TripPlanAuditValidationError();
+    }
+
+    const targetDay = targetPlanParsed.data.days.find((day) => day.dayNumber === dayNumber);
+    const sourceDay = sourcePlanParsed.data.days.find((day) => day.dayNumber === dayNumber);
+    if (targetDay === undefined || sourceDay === undefined) {
+      throw new TripPlanAuditValidationError();
+    }
+    const sourceItems = new Map(sourceDay.items.map((item) => [item.id, item]));
+    const targetRealItems = targetDay.items.filter((item) => item.place !== undefined);
+    if (
+      !sameStringArray(
+        order.data.orderedPointIds,
+        targetRealItems.map((item) => item.id),
+      )
+    ) {
+      throw new TripPlanAuditValidationError();
+    }
+    if (matrix.data.points.length !== targetRealItems.length) {
+      throw new TripPlanAuditValidationError();
+    }
+    for (const item of targetRealItems) {
+      const point = matrix.data.points.find((candidate) => candidate.id === item.id);
+      if (
+        point === undefined ||
+        item.place === undefined ||
+        point.endpoint.placeId !== item.place.id ||
+        point.endpoint.location.longitude !== item.place.location.longitude ||
+        point.endpoint.location.latitude !== item.place.location.latitude
+      ) {
+        throw new TripPlanAuditValidationError();
+      }
+    }
+    const earliestStart = Math.min(...sourceDay.items.map((item) => timeToMinutes(item.startTime)));
+    let cursor = earliestStart;
+    let previousPlaceItem: (typeof targetDay.items)[number] | undefined;
+    for (const item of targetDay.items) {
+      const previous = sourceItems.get(item.id);
+      if (previous === undefined) throw new TripPlanAuditValidationError();
+      const duration = timeToMinutes(previous.endTime) - timeToMinutes(previous.startTime);
+      const route =
+        item.place !== undefined && previousPlaceItem !== undefined ? item.route : undefined;
+      const travelMinutes =
+        route === undefined || route.dataSource === 'unavailable'
+          ? 0
+          : Math.ceil(route.durationSeconds / 60);
+      const expectedStart = cursor + travelMinutes;
+      const expectedEnd = expectedStart + duration;
+      if (
+        item.startTime !== minutesToTime(expectedStart) ||
+        item.endTime !== minutesToTime(expectedEnd)
+      ) {
+        throw new TripPlanAuditValidationError();
+      }
+      cursor = expectedEnd;
+      if (item.place !== undefined) previousPlaceItem = item;
+    }
+    for (let index = 1; index < targetRealItems.length; index += 1) {
+      const item = targetRealItems[index]!;
+      const route = item.route;
+      const leg = order.data.legs[index - 1];
+      if (
+        route === undefined ||
+        route.dataSource === 'unavailable' ||
+        leg === undefined ||
+        route.mode !== order.data.mode ||
+        route.distanceMeters !== leg.estimate.distanceMeters ||
+        route.durationSeconds !== leg.estimate.durationSeconds ||
+        route.origin.placeId !== targetRealItems[index - 1]!.place?.id ||
+        route.destination.placeId !== item.place?.id
+      ) {
+        throw new TripPlanAuditValidationError();
+      }
+    }
+    const timelineChanges = targetDay.items.map((item) => {
+      const previous = sourceItems.get(item.id);
+      if (previous === undefined) throw new TripPlanAuditValidationError();
+      const route = item.route;
+      return {
+        itemId: item.id,
+        previousStartTime: previous.startTime,
+        previousEndTime: previous.endTime,
+        nextStartTime: item.startTime,
+        nextEndTime: item.endTime,
+        routeStatus:
+          route === undefined
+            ? ('not_applicable' as const)
+            : route.dataSource === 'unavailable'
+              ? ('unavailable' as const)
+              : ('available' as const),
+        ...(route === undefined || route.dataSource === 'unavailable'
+          ? {}
+          : {
+              routeDurationSeconds: route.durationSeconds,
+              routeDistanceMeters: route.distanceMeters,
+            }),
+      };
+    });
+    const audit: TripPlanOptimizationAuditResult = {
+      tripId,
+      version,
+      sourceVersion: evidence.sourceVersion,
+      dayNumber,
+      mode: evidence.mode as RouteMode,
+      algorithm: 'nearest_neighbor',
+      isOptimal: false,
+      orderedItemIds: targetDay.items.map((item) => item.id),
+      ...(evidence.startItemId === null ? {} : { fixedStartItemId: evidence.startItemId }),
+      ...(evidence.endItemId === null ? {} : { fixedEndItemId: evidence.endItemId }),
+      decisions: explanation.data.decisions.map((decision) => ({
+        step: decision.step,
+        originItemId: decision.originId,
+        selectedDestinationItemId: decision.selectedDestinationId,
+        reason: decision.reason,
+        candidates: decision.candidates.map((candidate) => ({
+          destinationItemId: candidate.destinationId,
+          status: candidate.status,
+          ...(candidate.durationSeconds === undefined
+            ? {}
+            : { durationSeconds: candidate.durationSeconds }),
+          ...(candidate.distanceMeters === undefined
+            ? {}
+            : { distanceMeters: candidate.distanceMeters }),
+          ...(candidate.rejectionReason === undefined
+            ? {}
+            : { rejectionReason: candidate.rejectionReason }),
+        })),
+      })),
+      timelineChanges,
+      warnings: [
+        ...new Set([...explanation.data.order.warnings, explanation.data.algorithmNotice]),
+      ],
+      generatedAt: row.target.generatedAt.toISOString(),
+    };
+    const parsedAudit = TripPlanOptimizationAuditResultSchema.safeParse(audit);
+    if (!parsedAudit.success) throw new TripPlanAuditValidationError();
+    return parsedAudit.data;
   }
 
   public toGenerationResult(record: TripPlanVersionRecord): TripPlanGenerationResult {

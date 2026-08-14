@@ -117,6 +117,108 @@ const unavailablePairsFor = (
     });
 
 /**
+ * Explain a previously validated order using its original matrix. This only
+ * projects candidates and tie-break reasons; it never chooses a new order.
+ */
+export const explainRouteOrderResult = (
+  matrix: RouteMatrixResult,
+  order: RouteOrderResult,
+  startId?: string,
+  endId?: string,
+): RouteOrderExplanationResult => {
+  const cells = new Map(
+    matrix.cells.map((cell) => [pairKey(cell.originId, cell.destinationId), cell]),
+  );
+  const decisions: RouteOrderDecisionExplanation[] = order.legs.map((leg, index) => {
+    const remainingIds = order.orderedPointIds.slice(index + 1);
+    const heldEnd = endId !== undefined && remainingIds.length > 1;
+    const candidateExplanations = [...remainingIds]
+      .sort(compareIds)
+      .map((destinationId) =>
+        asCandidateExplanation(
+          destinationId,
+          cells.get(pairKey(leg.originId, destinationId)),
+          heldEnd && destinationId === endId,
+        ),
+      );
+    const selected = candidateExplanations.find(
+      (candidate) => candidate.destinationId === leg.destinationId,
+    );
+    if (selected?.status !== 'available') {
+      throw new RouteOrderAlgorithmError(
+        'ROUTE_ORDER_VALIDATION_ERROR',
+        'The persisted order references an unavailable route',
+      );
+    }
+    const considered = candidateExplanations
+      .filter(
+        (
+          candidate,
+        ): candidate is RouteOrderCandidateExplanation & {
+          durationSeconds: number;
+          distanceMeters: number;
+        } =>
+          candidate.status === 'available' &&
+          candidate.durationSeconds !== undefined &&
+          candidate.distanceMeters !== undefined &&
+          candidate.rejectionReason !== 'fixed_end',
+      )
+      .map((candidate) => ({
+        id: candidate.destinationId,
+        estimate: {
+          origin: leg.estimate.origin,
+          destination: leg.estimate.destination,
+          mode: leg.estimate.mode,
+          dataSource:
+            leg.estimate.dataSource === 'cache' ? ('cache' as const) : ('map_provider' as const),
+          provider: leg.estimate.provider,
+          fetchedAt: leg.estimate.fetchedAt,
+          durationSeconds: candidate.durationSeconds,
+          distanceMeters: candidate.distanceMeters,
+        },
+      }));
+    const fixedEnd =
+      endId !== undefined && leg.destinationId === endId && remainingIds.length === 1;
+    const selectedCandidate = {
+      id: leg.destinationId,
+      estimate: {
+        origin: leg.estimate.origin,
+        destination: leg.estimate.destination,
+        mode: leg.estimate.mode,
+        dataSource:
+          leg.estimate.dataSource === 'cache' ? ('cache' as const) : ('map_provider' as const),
+        provider: leg.estimate.provider,
+        fetchedAt: leg.estimate.fetchedAt,
+        durationSeconds: selected.durationSeconds!,
+        distanceMeters: selected.distanceMeters!,
+      },
+    };
+    return {
+      step: index + 1,
+      originId: leg.originId,
+      selectedDestinationId: leg.destinationId,
+      reason: decisionReason(selectedCandidate, considered, fixedEnd),
+      candidates: candidateExplanations,
+    };
+  });
+  const explanation: RouteOrderExplanationResult = {
+    order,
+    decisions,
+    unavailablePairs: unavailablePairsFor(matrix),
+    algorithmNotice: ALGORITHM_NOTICE,
+  };
+  const parsed = RouteOrderExplanationResultSchema.safeParse(explanation);
+  if (!parsed.success) {
+    throw new RouteOrderAlgorithmError(
+      'ROUTE_ORDER_VALIDATION_ERROR',
+      'The persisted route order explanation is invalid',
+    );
+  }
+  void startId;
+  return parsed.data;
+};
+
+/**
  * Build a deterministic nearest-neighbor order and its explanation from one real route matrix.
  * The result is intentionally a heuristic and is not guaranteed to be globally optimal.
  */

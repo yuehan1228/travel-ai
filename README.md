@@ -218,7 +218,9 @@ Trip 行级原子 reservation。成功保存递增的新不可变版本，失败
 
 `GET /trips/:id/plan/:version/optimize-audit?dayNumber=...` 只读取当前用户的 `ready` 版本，不创建 reservation、版本或任何数据库写入，也不调用路线 Provider、地图、LLM 或天气服务。审计结果使用严格的 `TripPlanOptimizationAuditResultSchema` 展示 nearest-neighbor 的逐步候选、固定起终点、真实路线度量和时间前后对比，并明确该启发式不保证全局最优。
 
-TASK-024 的现有版本快照没有持久化完整 RouteMatrix/RouteOrder 候选证据，因此默认 Repository 对该接口稳定返回 `TRIP_PLAN_AUDIT_UNAVAILABLE`；系统不会从最终相邻路线伪造候选比较。小程序详情页保留当前攻略并以普通文本显示不可回放提示，认证失效继续清理 Bearer Token。
+TASK-024 以前创建的版本没有持久化完整 RouteMatrix/RouteOrder 候选证据，因此这些历史版本仍稳定返回 `TRIP_PLAN_AUDIT_UNAVAILABLE`；系统不会从最终相邻路线伪造候选比较。小程序详情页保留当前攻略并以普通文本显示不可回放提示，认证失效继续清理 Bearer Token。
+
+TASK-026 为自动优化成功结果增加不可变 `trip_plan_optimization_evidence` 记录，在保存目标版本、日/条目快照和 Trip `ready` 状态的同一事务中写入本次已验证的 Matrix、Order 与 Explanation。审计读取同时约束 `userId + tripId + version + dayNumber`，重新通过共享 Schema 并校验 source ready 版本、候选度量、最终顺序和时间线；缺失证据返回 `TRIP_PLAN_AUDIT_UNAVAILABLE`，非法或篡改证据返回 `TRIP_PLAN_AUDIT_VALIDATION_ERROR`。Migration 不会自动执行，需人工审阅 `apps/server/migrations/0006_trip_plan_optimization_evidence.sql` 后显式迁移；历史版本和非优化操作不写入或修改 evidence。
 
 ### 旅行需求草稿 API（TASK-008）
 
